@@ -1,0 +1,39 @@
+version: 1
+timezone: Asia/Shanghai
+
+jobs:
+  daily-report:
+    enabled: true
+    template: daily-report
+    schedule:
+      time: "23:30"
+      days: [mon, tue, wed, thu, fri]
+    source:
+      type: codex
+    generator:
+      type: codex
+      model: null
+    sinks:
+      - type: markdown
+        directory: ~/.local/share/internflow/reports
+        filename: "{date}.md"
+
+  dev-log:
+    enabled: true
+    template: dev-log
+    schedule:
+      time: "23:45"
+      days: [mon, tue, wed, thu, fri]
+    source:
+      type: codex
+    generator:
+      type: codex
+      model: null
+    sinks:
+      - type: markdown
+        directory: ~/.local/share/internflow/dev-log
+        filename: "{date}.operations.json"
+      - type: lark
+        document: https://example.larkoffice.com/docx/replace-me
+        mode: section-append
+
