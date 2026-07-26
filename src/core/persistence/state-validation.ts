@@ -67,7 +67,7 @@ function isOutputArtifact(value: unknown): value is OutputArtifact {
     record
     && typeof record === 'object'
     && 'section' in record
-    && ['requirement', 'bugfix', 'insight'].includes(String(record.section))
+    && ['overview', 'requirement', 'bugfix', 'insight'].includes(String(record.section))
     && 'targetRef' in record
     && typeof record.targetRef === 'string'
     && 'markdown' in record

@@ -19,7 +19,7 @@ import {
   renderDailyReport,
   validateDailyDraft,
 } from '../../reports/daily/index.js';
-import { devLogPrompt } from '../../reports/dev-log/index.js';
+import { devLogMarkdownSection, devLogPrompt } from '../../reports/dev-log/index.js';
 import {
   buildFallbackPeriodReport,
   periodDraftJsonSchema,
@@ -33,22 +33,22 @@ const candidateRecordsResultSchema = z.strictObject({
   records: z.array(z.strictObject({
     candidateId: z.string().min(1),
     targetRef: z.string().min(1),
-    markdown: z.string().min(1).max(20_000),
-  })).max(12),
+    markdown: z.string().min(1).max(50_000),
+  })).max(48),
 });
 
 const candidateRecordsJsonSchema = {
   type: 'object', additionalProperties: false, required: ['records'],
   properties: {
     records: {
-      type: 'array', maxItems: 12,
+      type: 'array', maxItems: 48,
       items: {
         type: 'object', additionalProperties: false,
         required: ['candidateId', 'targetRef', 'markdown'],
         properties: {
           candidateId: { type: 'string', minLength: 1 },
           targetRef: { type: 'string', minLength: 1 },
-          markdown: { type: 'string', minLength: 1, maxLength: 20_000 },
+          markdown: { type: 'string', minLength: 1, maxLength: 50_000 },
         },
       },
     },
@@ -186,32 +186,191 @@ function validateCandidateRecords(
   );
   const headings = new Map((snapshot.headings || []).map((heading) => [heading.ref, heading]));
   const seen = new Set<string>();
-  return records.map((record, index) => {
+  const planOrder = new Map(
+    (batch.resolvedDevLogCandidates || []).flatMap((candidate) => (
+      candidate.writeTargets.map((target) => `${candidate.id}:${target.ref}`)
+    )).map((key, index) => [key, index]),
+  );
+  const mapped = records.map((record, index) => {
     const candidate = candidates.get(record.candidateId);
-    if (!candidate || seen.has(record.candidateId)) {
-      throw new Error(`Record ${index + 1} cites an unknown or repeated candidate id.`);
+    const key = `${record.candidateId}:${record.targetRef}`;
+    if (!candidate || seen.has(key)) {
+      throw new Error(`Record ${index + 1} cites an unknown or repeated candidate target.`);
     }
-    seen.add(record.candidateId);
-    if (!candidate.allowedTargetRefs.includes(record.targetRef)) {
+    seen.add(key);
+    const target = candidate.writeTargets.find((item) => item.ref === record.targetRef);
+    if (!target || !candidate.allowedTargetRefs.includes(record.targetRef)) {
       throw new Error(`Record ${index + 1} targets a ref not allowed by candidate ${candidate.id}.`);
     }
     const heading = headings.get(record.targetRef);
-    if (!heading?.section) {
+    if (!heading || heading.section !== target.section) {
       throw new Error(`Record ${index + 1} targets an unknown or unclassified heading ref.`);
     }
-    if (containsLevelOneOrTwoHeading(record.markdown)) {
+    const relatedCandidates = target.section === 'overview'
+      ? [...candidates.values()]
+      : [...candidates.values()].filter((item) => item.subjectHeading === candidate.subjectHeading);
+    const currentMarkdown = devLogMarkdownSection(snapshot, target.ref);
+    const relatedFacts = relatedCandidates.flatMap((item) => [
+      ...item.facts,
+      ...(item.operation === 'create' ? [`${item.subjectHeading} 已确认纳入档案`] : []),
+    ]);
+    const markdown = target.role === 'overview-todos' && target.operation === 'replace'
+      ? mergeUnresolvedOverviewTodos(record.markdown, currentMarkdown, relatedFacts)
+      : record.markdown;
+    if (containsLevelOneOrTwoHeading(markdown)) {
       throw new Error(`Record ${index + 1} may not add level-one or level-two headings.`);
     }
+    const structureIssue = devLogMarkdownIssue(markdown);
+    if (structureIssue) throw new Error(`Record ${index + 1} ${structureIssue}.`);
+    assertPlannedMarkdown(markdown, target.markdownPrefix, target.operation, index);
+    assertReplacementPreservesCurrent(
+      markdown,
+      target.role,
+      target.operation,
+      currentMarkdown,
+      relatedFacts,
+      index,
+    );
     return {
-      section: heading.section,
+      section: target.section,
       targetRef: record.targetRef,
-      markdown: `${record.markdown.trim()}\n`,
-      evidenceIds: candidate.evidenceIds,
+      markdown: `${markdown.trim()}\n`,
+      operation: target.operation,
+      role: target.role,
+      evidenceIds: [...new Set(relatedCandidates.flatMap((item) => item.evidenceIds))],
       candidateId: candidate.id,
-      subjectKey: candidate.subjectKey,
-      contentFingerprint: candidate.contentFingerprint,
+      candidateIds: relatedCandidates.map((item) => item.id),
+      ...(target.bindSubject ? {
+        subjectKey: candidate.subjectKey,
+        subjectHeading: candidate.subjectHeading,
+        bindSubject: true,
+        contentFingerprint: candidate.contentFingerprint,
+      } : { bindSubject: false }),
     };
   });
+  const missing = [...candidates.values()].flatMap((candidate) => (
+    candidate.writeTargets
+      .filter((target) => target.required && !seen.has(`${candidate.id}:${target.ref}`))
+      .map((target) => `${candidate.id}:${target.role}`)
+  ));
+  if (missing.length) {
+    throw new Error(`Codex omitted required dev-log targets: ${missing.join(', ')}.`);
+  }
+  const insertedHeadings = new Set<string>();
+  for (const record of mapped.filter((item) => item.operation === 'append' || item.operation === 'create')) {
+    const heading = record.markdown.match(/^(#{3,6})\s+(.+)$/m)?.[0].replace(/\s+/g, ' ').toLowerCase();
+    if (!heading) continue;
+    const key = `${record.targetRef}:${heading}`;
+    if (insertedHeadings.has(key)) {
+      throw new Error(`Codex generated duplicate inserted headings for target ${record.targetRef}.`);
+    }
+    insertedHeadings.add(key);
+  }
+  return mapped.sort((left, right) => {
+    const leftOverview = left.section === 'overview' ? 1 : 0;
+    const rightOverview = right.section === 'overview' ? 1 : 0;
+    if (leftOverview !== rightOverview) return leftOverview - rightOverview;
+    const leftKey = `${left.candidateId || ''}:${left.targetRef}`;
+    const rightKey = `${right.candidateId || ''}:${right.targetRef}`;
+    return (planOrder.get(leftKey) ?? Number.MAX_SAFE_INTEGER)
+      - (planOrder.get(rightKey) ?? Number.MAX_SAFE_INTEGER);
+  });
+}
+
+function mergeUnresolvedOverviewTodos(
+  markdown: string,
+  current: string,
+  facts: string[],
+): string {
+  if (!current) return markdown;
+  const oldTodos = current.match(/^\s*-\s+.+$/gm) || [];
+  const newTodos = markdown.match(/^\s*-\s+.+$/gm) || [];
+  const closureFacts = facts.filter((fact) => /已确认|已解决|已关闭|无需继续|已取消|已发布|已合入/.test(fact));
+  const missing = oldTodos.filter((todo) => {
+    const anchors = todoAnchors(todo);
+    if (!anchors.length) {
+      return !newTodos.some((item) => item.replace(/\s+/g, '') === todo.replace(/\s+/g, ''));
+    }
+    return anchors.some((anchor) => (
+      !newTodos.some((item) => item.toLowerCase().includes(anchor))
+      && !closureFacts.some((fact) => fact.toLowerCase().includes(anchor))
+    ));
+  });
+  if (!missing.length) return markdown;
+  return `${markdown.trimEnd()}\n${missing.join('\n')}`;
+}
+
+function assertReplacementPreservesCurrent(
+  markdown: string,
+  role: string,
+  operation: string,
+  current: string,
+  facts: string[],
+  index: number,
+): void {
+  if (operation !== 'replace' || !current) return;
+  if (role === 'overview-status') {
+    const oldIds = new Set(current.match(/\bREQ-\d+\b/g) || []);
+    const newIds = new Set(markdown.match(/\bREQ-\d+\b/g) || []);
+    const missing = [...oldIds].filter((id) => !newIds.has(id));
+    if (missing.length) {
+      throw new Error(`Record ${index + 1} drops existing overview rows: ${missing.join(', ')}.`);
+    }
+  }
+  if (role === 'requirement-overview') {
+    const labels = ['当前状态', '最近更新', '涉及仓库', '当前分支', '当前结论', '交付证据', '待处理事项'];
+    const missing = labels.filter((label) => current.includes(label) && !markdown.includes(label));
+    if (missing.length) {
+      throw new Error(`Record ${index + 1} drops requirement overview fields: ${missing.join(', ')}.`);
+    }
+  }
+  if (role === 'overview-todos') {
+    const oldTodos = current.match(/^\s*-\s+.+$/gm) || [];
+    const newTodos = markdown.match(/^\s*-\s+.+$/gm) || [];
+    const closureFacts = facts.filter((fact) => /已确认|已解决|已关闭|无需继续|已取消|已发布|已合入/.test(fact));
+    const missing = oldTodos.filter((todo) => {
+      const anchors = todoAnchors(todo);
+      if (!anchors.length) return newTodos.length < oldTodos.length;
+      return anchors.some((anchor) => (
+        !newTodos.some((item) => item.toLowerCase().includes(anchor))
+        && !closureFacts.some((fact) => fact.toLowerCase().includes(anchor))
+      ));
+    });
+    if (missing.length) {
+      throw new Error(`Record ${index + 1} drops unresolved overview todos without closure evidence.`);
+    }
+  }
+}
+
+function todoAnchors(todo: string): string[] {
+  const ids = todo.match(/\b(?:REQ|ISSUE)-\d+\b/gi) || [];
+  const words = todo.match(/\b[A-Za-z][A-Za-z0-9_-]{2,}\b/g) || [];
+  return [...new Set((ids.length ? ids : words).map((value) => value.toLowerCase()))];
+}
+
+function assertPlannedMarkdown(
+  markdown: string,
+  prefix: string,
+  operation: 'create' | 'append' | 'replace',
+  index: number,
+): void {
+  const normalized = markdown.replace(/\r\n?/g, '\n').trim();
+  const actualLines = normalized.split('\n');
+  const expectedLines = prefix.split('\n');
+  for (const [lineIndex, expected] of expectedLines.entries()) {
+    const actual = actualLines[lineIndex] || '';
+    const openEnded = expected === '##### ' || expected.endsWith('｜');
+    if (openEnded ? !actual.startsWith(expected) : actual !== expected) {
+      throw new Error(`Record ${index + 1} does not start with its locally planned heading.`);
+    }
+  }
+  if (operation !== 'replace' && operation !== 'create') return;
+  const headings = [...normalized.matchAll(/^(#{3,6})\s+(.+)$/gm)];
+  const firstLevel = headings[0]?.[1]?.length;
+  if (!firstLevel) throw new Error(`Record ${index + 1} must start with a heading.`);
+  if (headings.slice(1).some((heading) => (heading[1]?.length || 0) <= firstLevel)) {
+    throw new Error(`Record ${index + 1} contains a sibling section outside its planned target.`);
+  }
 }
 
 export function containsLevelOneOrTwoHeading(markdown: string): boolean {
@@ -222,6 +381,28 @@ export function containsLevelOneOrTwoHeading(markdown: string): boolean {
   return atxHeading.test(normalized)
     || setextHeading.test(normalized)
     || htmlHeading.test(normalized);
+}
+
+export function devLogMarkdownIssue(markdown: string): string | null {
+  const normalized = markdown.replace(/\r\n?/g, '\n');
+  if (/^#{3,6}\s+.*(?:问题索引与维护原则|常见问题类型|修复原则|记录规则|维护规则|后续增量|迁移自原文|状态纠正).*$/m.test(normalized)) {
+    return 'contains a maintenance-only heading';
+  }
+  const prose = normalized.replace(/```[\s\S]*?```/g, '');
+  if (/data-block-id\s*=|<[a-z][^>]*\sid\s*=/i.test(prose)) {
+    return 'contains stale remote block identifiers';
+  }
+  const sections = [...normalized.matchAll(/^####\s+(.+)$/gm)];
+  for (const [index, section] of sections.entries()) {
+    if (section[1]?.trim() !== '核心实现') continue;
+    const start = (section.index || 0) + section[0].length;
+    const end = sections[index + 1]?.index ?? normalized.length;
+    const body = normalized.slice(start, end);
+    if (/```/.test(body) && !/^#####\s+\S/m.test(body)) {
+      return 'contains core code without a meaningful level-five heading';
+    }
+  }
+  return null;
 }
 
 function parseJson(output: string): unknown {

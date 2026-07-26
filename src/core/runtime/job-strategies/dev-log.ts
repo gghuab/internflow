@@ -64,7 +64,7 @@ export function createDevLogStrategy(options: {
     },
     async afterSinkApplied(run, snapshot, artifact) {
       if (run.config.type === 'lark' && artifact.kind === 'records') {
-        await ledger.markSynced(artifact.records, snapshot?.revisionId);
+        await ledger.markSynced(artifact.records, snapshot?.revisionId, snapshot?.headings);
       }
     },
     decorateResult(result, context) {
@@ -109,8 +109,9 @@ async function resolveTargets(
   batch.resolvedDevLogCandidates = resolveDevLogCandidates(
     batch.devLogCandidates,
     snapshot,
-    await ledger.subjectTargets(),
+    await ledger.subjectBindings(),
     batch.decisionAssessments || (batch.decisionAssessments = []),
+    batch.date,
   );
   if (batch.devLogCandidates.length && !batch.resolvedDevLogCandidates.length) {
     throw new Error('No writable Lark heading matches the pending dev-log candidates.');
@@ -153,9 +154,9 @@ function assertCaptureReady(context: RunContext, batch: ActivityBatch): void {
 
 function virtualSnapshot(): SinkSnapshot {
   const headings: HeadingReference[] = [
-    { ref: 'h1', blockId: 'virtual-requirement', level: 2, text: '一、需求开发档案', section: 'requirement' },
-    { ref: 'h2', blockId: 'virtual-bugfix', level: 2, text: '二、问题定位与修复记录', section: 'bugfix' },
-    { ref: 'h3', blockId: 'virtual-insight', level: 2, text: '三、工程方法与知识沉淀', section: 'insight' },
+    { ref: 'h1', blockId: 'virtual-requirement', level: 2, text: '二、需求开发记录', section: 'requirement' },
+    { ref: 'h2', blockId: 'virtual-bugfix', level: 2, text: '三、问题与修复记录', section: 'bugfix' },
+    { ref: 'h3', blockId: 'virtual-insight', level: 2, text: '四、工程经验沉淀', section: 'insight' },
   ];
   return { markdown: '', headings };
 }

@@ -235,12 +235,17 @@ export class ArtifactStore {
       if (!heading) throw new Error(`Cannot persist unknown heading ref: ${operation.targetRef}`);
       return {
         section: operation.section,
+        ...(operation.operation ? { operation: operation.operation } : {}),
+        ...(operation.role ? { role: operation.role } : {}),
         targetHeadingId: heading.blockId,
         targetHeading: heading.text,
         markdown: operation.markdown,
         ...(operation.evidenceIds?.length ? { evidenceIds: operation.evidenceIds } : {}),
         ...(operation.candidateId ? { candidateId: operation.candidateId } : {}),
+        ...(operation.candidateIds?.length ? { candidateIds: operation.candidateIds } : {}),
         ...(operation.subjectKey ? { subjectKey: operation.subjectKey } : {}),
+        ...(operation.subjectHeading ? { subjectHeading: operation.subjectHeading } : {}),
+        ...(operation.bindSubject !== undefined ? { bindSubject: operation.bindSubject } : {}),
         ...(operation.contentFingerprint ? { contentFingerprint: operation.contentFingerprint } : {}),
       };
     });

@@ -41,6 +41,10 @@ export type {
 export type {
   DailyReportView,
   DevLogCandidate,
+  DevLogSection,
+  DevLogTargetRole,
+  DevLogWriteOperation,
+  DevLogWriteTarget,
   PeriodEntry,
   PeriodGroup,
   PeriodReportView,

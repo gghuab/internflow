@@ -31,6 +31,7 @@ export function projectDevLogCandidates(
       item.goal,
       ...item.actions,
       ...item.outcomes,
+      ...item.decisions,
       ...item.blockers,
     ].filter(Boolean))].slice(0, 16);
     const contentFingerprint = stableHash(JSON.stringify({

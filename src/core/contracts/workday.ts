@@ -74,10 +74,37 @@ export interface VisualPlanItem {
   assessmentId: string;
 }
 
+export type DevLogSection = 'overview' | 'requirement' | 'bugfix' | 'insight';
+export type DevLogWriteOperation = 'create' | 'append' | 'replace';
+export type DevLogTargetRole =
+  | 'entry'
+  | 'change-log'
+  | 'requirement-overview'
+  | 'background'
+  | 'design'
+  | 'implementation'
+  | 'verification'
+  | 'retrospective'
+  | 'issue'
+  | 'insight'
+  | 'overview-status'
+  | 'overview-recent'
+  | 'overview-todos';
+
+export interface DevLogWriteTarget {
+  ref: string;
+  section: DevLogSection;
+  operation: DevLogWriteOperation;
+  role: DevLogTargetRole;
+  required: boolean;
+  markdownPrefix: string;
+  bindSubject: boolean;
+}
+
 export interface DevLogCandidate {
   id: string;
   subjectKey: string;
-  section: 'requirement' | 'bugfix' | 'insight';
+  section: Exclude<DevLogSection, 'overview'>;
   operation: 'create' | 'append';
   title: string;
   repositoryKey?: string;
@@ -94,7 +121,9 @@ export interface DevLogCandidate {
 }
 
 export interface ResolvedDevLogCandidate extends DevLogCandidate {
+  subjectHeading: string;
   allowedTargetRefs: string[];
+  writeTargets: DevLogWriteTarget[];
   routingAssessmentId: string;
 }
 
