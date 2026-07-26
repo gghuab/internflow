@@ -34,4 +34,3 @@ export async function acquireRunLock(jobName: string, date: string): Promise<() 
 function isAlreadyExists(error: unknown): boolean {
   return Boolean(error && typeof error === 'object' && 'code' in error && error.code === 'EEXIST');
 }
-

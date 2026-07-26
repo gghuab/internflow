@@ -1,8 +1,8 @@
-import type { GeneratorPlugin, SinkPlugin, SourcePlugin } from './types.js';
-import { CodexGenerator } from '../plugins/generators/codex.js';
-import { CodexSource } from '../plugins/sources/codex.js';
-import { LarkSink } from '../plugins/sinks/lark.js';
-import { MarkdownSink } from '../plugins/sinks/markdown.js';
+import type { GeneratorPlugin, SinkPlugin, SourcePlugin } from '../contracts/index.js';
+import { CodexGenerator } from '../../plugins/generators/codex.js';
+import { LarkSink } from '../../plugins/sinks/lark.js';
+import { MarkdownSink } from '../../plugins/sinks/markdown.js';
+import { CodexSource } from '../../sessions/codex/index.js';
 
 export class PluginRegistry {
   readonly sources = new Map<string, SourcePlugin>();
@@ -34,4 +34,3 @@ export class PluginRegistry {
     return plugin;
   }
 }
-

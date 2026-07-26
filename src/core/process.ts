@@ -105,6 +105,10 @@ export async function runCommand(
     }
 
     child.on('error', (error) => rejectOnce(error));
+    child.stdin?.on('error', (error: NodeJS.ErrnoException) => {
+      // 子进程提前退出时会主动关闭输入管道；等待 close 事件，以保留真实的退出码和错误输出。
+      if (error.code !== 'EPIPE') rejectOnce(error);
+    });
     child.on('close', (code) => {
       if (timedOut) {
         rejectOnce(timeoutError());
@@ -112,7 +116,7 @@ export async function runCommand(
       }
       const result = { stdout, stderr, exitCode: code ?? 1 };
       if (result.exitCode !== 0) {
-        const detail = options.sensitiveOutput ? '' : `\n${stderr || stdout}`;
+        const detail = formatCommandFailureDetail(stdout, stderr, Boolean(options.sensitiveOutput));
         const command = options.sensitiveOutput ? executable : `${executable} ${args.join(' ')}`;
         rejectOnce(new Error(`${command} failed (${result.exitCode})${detail}`));
         return;
@@ -157,4 +161,30 @@ export async function resolveExecutable(name: string, configured?: string): Prom
 
 export function executableDirectory(executable: string): string {
   return dirname(executable);
+}
+
+function formatCommandFailureDetail(
+  stdout: string,
+  stderr: string,
+  sensitiveOutput: boolean,
+): string {
+  const raw = (stderr || stdout || '').trim();
+  if (!raw) return '';
+  if (!sensitiveOutput) return `\n${raw}`;
+
+  // For sensitive commands (prompt/model I/O), never dump full streams. Only keep
+  // short diagnostic lines that look like auth/model/proxy failures.
+  const diagnostic = raw
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .filter((line) => (
+      /error|failed|invalid|unauthorized|forbidden|timeout|refused|econn|enotfound|status\s+\d{3}|http\s+\d{3}|model|proxy|auth|login|rate.?limit|not found|unavailable/i.test(line)
+    ))
+    .slice(-8)
+    .join('\n')
+    .slice(0, 800)
+    .replace(/\b(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, '$1[REDACTED]')
+    .replace(/\b(sk-(?:ant-)?[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{20,})\b/gi, '[REDACTED]');
+  return diagnostic ? `\n${diagnostic}` : '';
 }
