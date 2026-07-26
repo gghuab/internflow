@@ -64,6 +64,7 @@ export class CodexGenerator implements GeneratorPlugin {
     batch: ActivityBatch,
     snapshot?: SinkSnapshot,
   ): Promise<OutputArtifact> {
+    if (config.type !== 'codex') throw new Error('CodexGenerator received non-Codex config.');
     const executable = await resolveExecutable('codex', config.executable);
     if (!executable) {
       if (context.job.template === 'daily-report') {

@@ -6,6 +6,7 @@ import type {
   DevLogTargetRole,
   DevLogWriteOperation,
 } from './workday.js';
+import type { WorkspaceCandidate } from './workspace.js';
 
 export interface HeadingReference {
   ref: string;
@@ -38,7 +39,8 @@ export interface AppendRecord {
 
 export type OutputArtifact =
   | { kind: 'markdown'; markdown: string; rawMarkdown?: string }
-  | { kind: 'records'; records: AppendRecord[] };
+  | { kind: 'records'; records: AppendRecord[] }
+  | { kind: 'workspace'; candidates: WorkspaceCandidate[] };
 
 export interface SourcePlugin {
   name: SourceConfig['type'];

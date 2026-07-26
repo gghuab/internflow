@@ -57,8 +57,9 @@ export interface DailyReportStatus {
 }
 
 export interface DevLogRecordView {
-  section: 'requirement' | 'bugfix' | 'insight';
+  section: 'overview' | 'requirement' | 'bugfix' | 'insight';
   sectionLabel: string;
+  operation: 'create' | 'append' | 'replace';
   targetHeading: string;
   markdown: string;
   evidenceCount: number;
@@ -80,9 +81,10 @@ export interface DevLogPreviewResult {
 }
 
 const DEV_LOG_SECTION_LABELS: Record<DevLogRecordView['section'], string> = {
-  requirement: '一、需求开发档案',
-  bugfix: '二、问题定位与修复记录',
-  insight: '三、工程方法与知识沉淀',
+  overview: '一、开发总览',
+  requirement: '二、需求开发记录',
+  bugfix: '三、问题与修复记录',
+  insight: '四、工程经验沉淀',
 };
 
 function localDate(date: Date, timezone: string): string {
@@ -276,6 +278,9 @@ export async function generateDailyReportPreview(options: {
 
   try {
     const { config, jobName, job, date, batch } = await collectTodayBatch(options);
+    if (job.generator.type !== 'codex') {
+      throw new Error('Daily report preview requires the Codex generator.');
+    }
     const activities = batch.activities.map(summarize);
     partial = {
       date,
@@ -377,6 +382,9 @@ export async function generateDevLogPreview(options: {
 
   try {
     const { config, jobName, job, date, batch } = await collectTodayBatch(options, resolveDevLogJob);
+    if (job.generator.type !== 'codex') {
+      throw new Error('Dev-log preview requires the Codex generator.');
+    }
     const usedLarkOutline = job.sinks.some(
       (sink) => sink.type === 'lark' && sink.mode === 'section-append',
     );
@@ -474,6 +482,7 @@ export async function generateDevLogPreview(options: {
 
 interface PersistedDevLogOperation {
   section?: string;
+  operation?: string;
   targetHeading?: string;
   markdown?: string;
   evidenceIds?: string[];
@@ -488,11 +497,15 @@ async function readDevLogOperations(operationsPath?: string): Promise<DevLogReco
   return operations
     .filter((operation): operation is PersistedDevLogOperation & { section: DevLogRecordView['section'] } =>
       operation.section === 'requirement'
+      || operation.section === 'overview'
       || operation.section === 'bugfix'
       || operation.section === 'insight')
     .map((operation) => ({
       section: operation.section,
       sectionLabel: DEV_LOG_SECTION_LABELS[operation.section],
+      operation: operation.operation === 'create' || operation.operation === 'replace'
+        ? operation.operation
+        : 'append',
       targetHeading: operation.targetHeading || '',
       markdown: (operation.markdown || '').trim(),
       evidenceCount: operation.evidenceIds?.length ?? 0,

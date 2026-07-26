@@ -58,3 +58,9 @@ export type {
   VisualMode,
   VisualPlanItem,
 } from './workday.js';
+export type {
+  WorkspaceCandidate,
+  WorkspaceEntry,
+  WorkspaceState,
+  WorkspaceSubject,
+} from './workspace.js';

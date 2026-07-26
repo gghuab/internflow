@@ -63,7 +63,7 @@ export async function runJob(
       dryRun: Boolean(options.dryRun),
       ...(options.model ? { model: options.model } : {}),
       generatorType: job.generator.type,
-      generatorModel: job.generator.model,
+      generatorModel: job.generator.type === 'codex' ? job.generator.model : null,
     });
     release = await acquireRunLock(jobName, options.date);
     const result = await runJobUnlocked(

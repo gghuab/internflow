@@ -110,16 +110,23 @@ job
 
 job
   .command('add <template>')
-  .description('add a daily-report, weekly-report, monthly-report, or dev-log job')
+  .description('add a report, dev-log, or workspace job')
   .option('--name <name>', 'job name')
   .option('--time <HH:mm>', 'scheduled time')
   .option('--document <url>', 'Lark document URL')
+  .option('--directory <path>', 'Workspace data directory')
   .option('--model <model>', 'Codex model')
   .action(async (
     template: string,
-    options: { name?: string; time?: string; document?: string; model?: string },
+    options: {
+      name?: string;
+      time?: string;
+      document?: string;
+      directory?: string;
+      model?: string;
+    },
   ) => {
-    if (!['daily-report', 'weekly-report', 'monthly-report', 'dev-log'].includes(template)) {
+    if (!['daily-report', 'weekly-report', 'monthly-report', 'dev-log', 'workspace'].includes(template)) {
       throw new Error(`Unknown template: ${template}`);
     }
     if (template === 'dev-log' && !options.document) {
@@ -128,10 +135,13 @@ job
     const config = await loadCurrentConfig();
     const name = options.name || template;
     if (config.jobs[name]) throw new Error(`Job already exists: ${name}`);
-    config.jobs[name] = createJob(template as JobConfig['template'], options);
+    config.jobs[name] = createJob(template as JobConfig['template'], { ...options, name });
     const validated = internFlowConfigSchema.parse(config);
     await writeConfig(validated, configPath());
     console.log(`Added job ${name}.`);
+    if (template === 'workspace') {
+      console.log(`Enable daily sync with \`internflow schedule install ${name}\`.`);
+    }
   });
 
 program
@@ -256,8 +266,36 @@ async function loadCurrentConfig(): Promise<InternFlowConfig> {
 
 function createJob(
   template: JobConfig['template'],
-  options: { time?: string; document?: string; model?: string },
+  options: {
+    name: string;
+    time?: string;
+    document?: string;
+    directory?: string;
+    model?: string;
+  },
 ): JobConfig {
+  if (template === 'workspace') {
+    return {
+      enabled: true,
+      template,
+      schedule: {
+        time: options.time || '23:50',
+        days: ['mon', 'tue', 'wed', 'thu', 'fri'],
+        dateOffsetDays: 0,
+        runOn: 'scheduled-day',
+      },
+      skipDates: [],
+      source: { type: 'codex', dayEndTime: '23:30' },
+      generator: { type: 'local' },
+      sinks: [{
+        type: 'workspace',
+        id: options.name,
+        directory: options.directory
+          || `~/.local/share/internflow/workspaces/${options.name}`,
+      }],
+    };
+  }
+
   const isReport = template !== 'dev-log';
   const reportTitle = template === 'daily-report'
     ? 'Codex 日报'
@@ -322,6 +360,7 @@ async function doctor(online = false): Promise<Array<{ ok: boolean; message: str
 
   const checkedGenerators = new Set<string>();
   for (const [jobName, value] of Object.entries(config.jobs)) {
+    if (value.generator.type !== 'codex') continue;
     const configured = value.generator.executable || '';
     if (checkedGenerators.has(configured)) continue;
     checkedGenerators.add(configured);

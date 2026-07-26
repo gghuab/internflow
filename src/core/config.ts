@@ -48,11 +48,20 @@ const sourceSchema = z.strictObject({
   exclude: z.array(z.string()).optional(),
 });
 
-const generatorSchema = z.strictObject({
+const codexGeneratorSchema = z.strictObject({
   type: z.literal('codex'),
   executable: z.string().optional(),
   model: z.string().nullable().default(null),
 });
+
+const localGeneratorSchema = z.strictObject({
+  type: z.literal('local'),
+});
+
+const generatorSchema = z.discriminatedUnion('type', [
+  codexGeneratorSchema,
+  localGeneratorSchema,
+]);
 
 const markdownSinkSchema = z.strictObject({
   type: z.literal('markdown'),
@@ -73,16 +82,27 @@ const larkSinkSchema = z.strictObject({
   title: z.string().optional(),
 });
 
+const workspaceSinkSchema = z.strictObject({
+  type: z.literal('workspace'),
+  id: jobIdSchema,
+  directory: z.string().min(1),
+});
+
 const jobSchema = z.strictObject({
   enabled: z.boolean().default(true),
-  template: z.enum(['daily-report', 'weekly-report', 'monthly-report', 'dev-log']),
+  template: z.enum(['daily-report', 'weekly-report', 'monthly-report', 'dev-log', 'workspace']),
   schedule: scheduleSchema,
   skipDates: z.array(localDateSchema).default([]),
   source: sourceSchema,
   generator: generatorSchema,
-  sinks: z.array(z.discriminatedUnion('type', [markdownSinkSchema, larkSinkSchema])).min(1),
+  sinks: z.array(z.discriminatedUnion('type', [
+    markdownSinkSchema,
+    larkSinkSchema,
+    workspaceSinkSchema,
+  ])).min(1),
 }).superRefine((job, context) => {
   const larkSinks = job.sinks.filter((sink) => sink.type === 'lark');
+  const workspaceSinks = job.sinks.filter((sink) => sink.type === 'workspace');
   if (job.template === 'dev-log' && job.enabled) {
     if (larkSinks.length !== 1 || larkSinks[0]?.mode !== 'section-append') {
       context.addIssue({
@@ -102,6 +122,34 @@ const jobSchema = z.strictObject({
       message: 'A report job only supports append or history-replace Lark mode.',
     });
   }
+  if (
+    job.template === 'workspace'
+    && (
+      job.generator.type !== 'local'
+      || workspaceSinks.length !== 1
+      || job.sinks.length !== 1
+    )
+  ) {
+    context.addIssue({
+      code: 'custom',
+      path: ['sinks'],
+      message: 'A workspace job requires the local generator and exactly one Workspace sink.',
+    });
+  }
+  if (job.template !== 'workspace' && workspaceSinks.length) {
+    context.addIssue({
+      code: 'custom',
+      path: ['sinks'],
+      message: 'A Workspace sink can only be used by a workspace job.',
+    });
+  }
+  if (job.template !== 'workspace' && job.generator.type === 'local') {
+    context.addIssue({
+      code: 'custom',
+      path: ['generator'],
+      message: 'The local generator can only be used by a workspace job.',
+    });
+  }
 });
 
 export const internFlowConfigSchema = z.strictObject({
@@ -116,7 +164,10 @@ export type InternFlowConfig = z.infer<typeof internFlowConfigSchema>;
 export type JobConfig = z.infer<typeof jobSchema>;
 export type SourceConfig = z.infer<typeof sourceSchema>;
 export type GeneratorConfig = z.infer<typeof generatorSchema>;
-export type SinkConfig = z.infer<typeof markdownSinkSchema> | z.infer<typeof larkSinkSchema>;
+export type SinkConfig =
+  | z.infer<typeof markdownSinkSchema>
+  | z.infer<typeof larkSinkSchema>
+  | z.infer<typeof workspaceSinkSchema>;
 export type ScheduleConfig = z.infer<typeof scheduleSchema>;
 export type DayName = z.infer<typeof daySchema>;
 
