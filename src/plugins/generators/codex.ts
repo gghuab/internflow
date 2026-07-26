@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import type { GeneratorConfig } from '../../core/config.js';
@@ -10,32 +10,43 @@ import type {
   OutputArtifact,
   RunContext,
   SinkSnapshot,
-} from '../../core/types.js';
-import { dailyReportPrompt } from '../../templates/daily-report.js';
-import { devLogPrompt } from '../../templates/dev-log.js';
+} from '../../core/contracts/index.js';
+import {
+  buildFallbackDailyReport,
+  dailyDraftJsonSchema,
+  dailyDraftSchema,
+  dailyReportPrompt,
+  renderDailyReport,
+  validateDailyDraft,
+} from '../../reports/daily/index.js';
+import { devLogPrompt } from '../../reports/dev-log/index.js';
+import {
+  buildFallbackPeriodReport,
+  periodDraftJsonSchema,
+  periodDraftSchema,
+  periodReportPrompt,
+  renderPeriodReport,
+  validatePeriodDraft,
+} from '../../reports/period/index.js';
 
-const recordsResultSchema = z.strictObject({
+const candidateRecordsResultSchema = z.strictObject({
   records: z.array(z.strictObject({
-    section: z.enum(['requirement', 'bugfix', 'insight']),
+    candidateId: z.string().min(1),
     targetRef: z.string().min(1),
     markdown: z.string().min(1).max(20_000),
   })).max(12),
 });
 
-const recordsJsonSchema = {
-  type: 'object',
-  additionalProperties: false,
-  required: ['records'],
+const candidateRecordsJsonSchema = {
+  type: 'object', additionalProperties: false, required: ['records'],
   properties: {
     records: {
-      type: 'array',
-      maxItems: 12,
+      type: 'array', maxItems: 12,
       items: {
-        type: 'object',
-        additionalProperties: false,
-        required: ['section', 'targetRef', 'markdown'],
+        type: 'object', additionalProperties: false,
+        required: ['candidateId', 'targetRef', 'markdown'],
         properties: {
-          section: { type: 'string', enum: ['requirement', 'bugfix', 'insight'] },
+          candidateId: { type: 'string', minLength: 1 },
           targetRef: { type: 'string', minLength: 1 },
           markdown: { type: 'string', minLength: 1, maxLength: 20_000 },
         },
@@ -54,15 +65,31 @@ export class CodexGenerator implements GeneratorPlugin {
     snapshot?: SinkSnapshot,
   ): Promise<OutputArtifact> {
     const executable = await resolveExecutable('codex', config.executable);
-    if (!executable) throw new Error('Codex CLI was not found. Run `internflow doctor`.');
+    if (!executable) {
+      if (context.job.template === 'daily-report') {
+        const fallback = buildFallbackDailyReport(batch);
+        return { kind: 'markdown', markdown: fallback, rawMarkdown: fallback };
+      }
+      if (isPeriodReport(context.job.template)) {
+        const fallback = buildFallbackPeriodReport(batch);
+        return { kind: 'markdown', markdown: fallback, rawMarkdown: fallback };
+      }
+      throw new Error('Codex CLI was not found. Run `internflow doctor`.');
+    }
 
     const runDir = join(stateDirectory(), 'runs', context.jobName, context.date);
     await mkdir(runDir, { recursive: true });
-    const outputPath = join(runDir, context.job.template === 'dev-log' ? 'records.json' : 'report.md');
+    const outputPath = join(
+      runDir,
+      context.job.template === 'dev-log' ? 'records.json' : 'report-draft.json',
+    );
     const schemaPath = join(runDir, 'records.schema.json');
     const prompt = context.job.template === 'dev-log'
       ? devLogPrompt(batch, snapshot || {})
-      : dailyReportPrompt(batch);
+      : isPeriodReport(context.job.template)
+        ? periodReportPrompt(batch)
+        : dailyReportPrompt(batch);
+    await rm(outputPath, { force: true });
 
     const args = [
       'exec',
@@ -73,54 +100,117 @@ export class CodexGenerator implements GeneratorPlugin {
       '--output-last-message',
       outputPath,
     ];
-    if (context.job.template === 'dev-log') {
-      await writeFile(schemaPath, `${JSON.stringify(recordsJsonSchema, null, 2)}\n`, 'utf8');
-      args.push('--output-schema', schemaPath);
-    }
-    const model = context.modelOverride || config.model;
+    const schema = context.job.template === 'dev-log'
+      ? candidateRecordsJsonSchema
+      : isPeriodReport(context.job.template)
+        ? periodDraftJsonSchema
+        : dailyDraftJsonSchema;
+    await writeFile(schemaPath, `${JSON.stringify(schema, null, 2)}\n`, 'utf8');
+    args.push('--output-schema', schemaPath);
+    const model = context.modelOverride
+      || config.model
+      || (context.job.template !== 'dev-log' ? 'gpt-5.6-sol' : null);
     if (model) args.push('--model', model);
     args.push('-');
 
+    let output: string;
     // Prompt 只走 stdin，避免会话和文档正文出现在进程参数列表中。
-    await runCommand(executable, args, {
-      cwd: runDir,
-      input: prompt,
-      timeoutMs: 15 * 60 * 1000,
-      sensitiveOutput: true,
-    });
+    try {
+      await runCommand(executable, args, {
+        cwd: runDir,
+        input: prompt,
+        timeoutMs: 15 * 60 * 1000,
+        sensitiveOutput: true,
+      });
+      output = (await readFile(outputPath, 'utf8')).trim();
+      if (!output) throw new Error('Codex did not write a report.');
+    } catch (error) {
+      if (context.job.template === 'dev-log') throw error;
+      // 模型失败时仍由本地事实渲染器输出完整报告，不丢工作项。
+      const fallback = isPeriodReport(context.job.template)
+        ? buildFallbackPeriodReport(batch)
+        : buildFallbackDailyReport(batch);
+      await writeFile(outputPath, fallback, { encoding: 'utf8', mode: 0o600 });
+      return { kind: 'markdown', markdown: fallback, rawMarkdown: fallback };
+    }
 
-    const output = (await readFile(outputPath, 'utf8')).trim();
     if (context.job.template === 'daily-report') {
-      if (!output.startsWith(`# ${context.date}`)) {
-        throw new Error(`Codex output must start with "# ${context.date}".`);
+      if (!batch.dailyView) throw new Error('Daily report requires a WorkItem projection.');
+      try {
+        const parsed = dailyDraftSchema.safeParse(parseJson(output));
+        if (!parsed.success) throw new Error(`Invalid Codex daily draft:\n${z.prettifyError(parsed.error)}`);
+        const draft = validateDailyDraft(batch.dailyView, parsed.data);
+        const markdown = renderDailyReport(batch, batch.dailyView, draft);
+        return { kind: 'markdown', markdown, rawMarkdown: markdown };
+      } catch {
+        const fallback = buildFallbackDailyReport(batch);
+        return { kind: 'markdown', markdown: fallback, rawMarkdown: fallback };
       }
-      return { kind: 'markdown', markdown: `${output}\n` };
+    }
+
+    if (isPeriodReport(context.job.template)) {
+      try {
+        if (!batch.periodView) throw new Error('Period report requires a PeriodReportView.');
+        const parsed = periodDraftSchema.safeParse(parseJson(output));
+        if (!parsed.success) throw new Error(`Invalid Codex period draft:\n${z.prettifyError(parsed.error)}`);
+        const draft = validatePeriodDraft(batch.periodView, parsed.data);
+        const markdown = renderPeriodReport(batch, draft);
+        return { kind: 'markdown', markdown, rawMarkdown: markdown };
+      } catch {
+        const fallback = buildFallbackPeriodReport(batch);
+        return { kind: 'markdown', markdown: fallback, rawMarkdown: fallback };
+      }
     }
 
     const value = parseJson(output);
-    const result = recordsResultSchema.safeParse(value);
-    if (!result.success) throw new Error(`Invalid Codex records output:\n${z.prettifyError(result.error)}`);
+    const result = candidateRecordsResultSchema.safeParse(value);
+    if (!result.success) throw new Error(`Invalid Codex candidate records output:\n${z.prettifyError(result.error)}`);
     return {
       kind: 'records',
-      records: validateRecordTargets(result.data.records, snapshot || {}),
+      records: validateCandidateRecords(result.data.records, batch, snapshot || {}),
     };
   }
 }
 
-function validateRecordTargets(
-  records: z.infer<typeof recordsResultSchema>['records'],
+function isPeriodReport(template: RunContext['job']['template']): boolean {
+  return template === 'weekly-report' || template === 'monthly-report';
+}
+
+function validateCandidateRecords(
+  records: z.infer<typeof candidateRecordsResultSchema>['records'],
+  batch: ActivityBatch,
   snapshot: SinkSnapshot,
-): z.infer<typeof recordsResultSchema>['records'] {
+): Extract<OutputArtifact, { kind: 'records' }>['records'] {
+  const candidates = new Map(
+    (batch.resolvedDevLogCandidates || []).map((candidate) => [candidate.id, candidate]),
+  );
   const headings = new Map((snapshot.headings || []).map((heading) => [heading.ref, heading]));
+  const seen = new Set<string>();
   return records.map((record, index) => {
+    const candidate = candidates.get(record.candidateId);
+    if (!candidate || seen.has(record.candidateId)) {
+      throw new Error(`Record ${index + 1} cites an unknown or repeated candidate id.`);
+    }
+    seen.add(record.candidateId);
+    if (!candidate.allowedTargetRefs.includes(record.targetRef)) {
+      throw new Error(`Record ${index + 1} targets a ref not allowed by candidate ${candidate.id}.`);
+    }
     const heading = headings.get(record.targetRef);
-    if (!heading || heading.section !== record.section) {
-      throw new Error(`Record ${index + 1} targets an unknown or mismatched heading ref.`);
+    if (!heading?.section) {
+      throw new Error(`Record ${index + 1} targets an unknown or unclassified heading ref.`);
     }
     if (containsLevelOneOrTwoHeading(record.markdown)) {
       throw new Error(`Record ${index + 1} may not add level-one or level-two headings.`);
     }
-    return { ...record, markdown: `${record.markdown.trim()}\n` };
+    return {
+      section: heading.section,
+      targetRef: record.targetRef,
+      markdown: `${record.markdown.trim()}\n`,
+      evidenceIds: candidate.evidenceIds,
+      candidateId: candidate.id,
+      subjectKey: candidate.subjectKey,
+      contentFingerprint: candidate.contentFingerprint,
+    };
   });
 }
 
