@@ -14,10 +14,16 @@ import {
   type JobConfig,
 } from './core/config.js';
 import { defaultConfigPath, expandHome } from './core/paths.js';
+import {
+  defaultLegacyConfigPaths,
+  formatLegacyMigrationPreview,
+  migrateLegacyConfig,
+} from './core/legacy-migration.js';
 import { resolveExecutable, runCommand } from './core/process.js';
-import { PluginRegistry } from './core/registry.js';
-import { runJob } from './core/runner.js';
+import { PluginRegistry } from './core/runtime/registry.js';
+import { runJob } from './core/runtime/runner.js';
 import { assertLaunchdTimezone, LaunchdScheduler } from './plugins/schedulers/launchd.js';
+import { addLocalDays } from './core/calendar.js';
 
 const program = new Command();
 
@@ -40,6 +46,44 @@ program
     await chmod(path, 0o600);
     console.log(`Created ${path}`);
     console.log('Next: edit the jobs, then run `internflow doctor`.');
+  });
+
+const migrate = program.command('migrate').description('migrate an existing automation');
+const legacyPaths = defaultLegacyConfigPaths();
+
+migrate
+  .command('legacy')
+  .description('preview or import the two legacy daily-report configurations')
+  .option('--daily-config <path>', 'legacy daily report config', legacyPaths.daily)
+  .option('--dev-config <path>', 'legacy dev document sync config', legacyPaths.dev)
+  .option('--apply', 'write the migrated InternFlow configuration')
+  .option('--force', 'replace an existing target configuration (requires --apply)')
+  .action(async (options: {
+    dailyConfig: string;
+    devConfig: string;
+    apply?: boolean;
+    force?: boolean;
+  }) => {
+    const result = await migrateLegacyConfig({
+      dailyConfigPath: options.dailyConfig,
+      devConfigPath: options.devConfig,
+      targetPath: configPath(),
+      apply: Boolean(options.apply),
+      force: Boolean(options.force),
+    });
+
+    if (!result.applied) {
+      console.log('Legacy migration preview (no files changed):');
+      console.log(formatLegacyMigrationPreview(result.config).trimEnd());
+      console.log(`Target: ${result.targetPath}`);
+      console.log('Existing launchd schedules were not inspected or changed.');
+      console.log('Apply with `internflow migrate legacy --apply`.');
+      return;
+    }
+
+    console.log(`Migrated legacy configuration to ${result.targetPath}`);
+    console.log('Existing launchd schedules were not installed, removed, or changed.');
+    console.log('Next: run `internflow doctor`, then test both jobs with `--dry-run`.');
   });
 
 const job = program.command('job').description('manage jobs');
@@ -66,7 +110,7 @@ job
 
 job
   .command('add <template>')
-  .description('add a daily-report or dev-log job')
+  .description('add a daily-report, weekly-report, monthly-report, or dev-log job')
   .option('--name <name>', 'job name')
   .option('--time <HH:mm>', 'scheduled time')
   .option('--document <url>', 'Lark document URL')
@@ -75,7 +119,7 @@ job
     template: string,
     options: { name?: string; time?: string; document?: string; model?: string },
   ) => {
-    if (!['daily-report', 'dev-log'].includes(template)) {
+    if (!['daily-report', 'weekly-report', 'monthly-report', 'dev-log'].includes(template)) {
       throw new Error(`Unknown template: ${template}`);
     }
     if (template === 'dev-log' && !options.document) {
@@ -95,7 +139,7 @@ program
   .description('run one job')
   .option('--date <YYYY-MM-DD>', 'target local date')
   .option('--dry-run', 'generate previews without writing remote sinks')
-  .option('--force', 'run a disabled job or bypass idempotency')
+  .option('--force', 'run a disabled job or resume an inspected pending write')
   .option('--model <model>', 'override the configured model for this run')
   .option('--scheduled', 'mark a scheduler-triggered run')
   .action(async (
@@ -103,7 +147,12 @@ program
     options: { date?: string; dryRun?: boolean; force?: boolean; model?: string },
   ) => {
     const config = await loadCurrentConfig();
-    const date = options.date || localDate(new Date(), config.timezone);
+    const configuredJob = config.jobs[jobName];
+    if (!configuredJob) throw new Error(`Unknown job: ${jobName}`);
+    const date = options.date || addLocalDays(
+      localDate(new Date(), config.timezone),
+      configuredJob.schedule.dateOffsetDays ?? 0,
+    );
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error(`Invalid date: ${date}`);
     const result = await runJob(config, jobName, {
       date,
@@ -174,6 +223,24 @@ schedule
     console.log(JSON.stringify(await new LaunchdScheduler().remove(jobName), null, 2));
   });
 
+program
+  .command('web')
+  .description('open the Codex report preview UI')
+  .option('--host <host>', 'bind host (non-loopback requires INTERNFLOW_WEB_TOKEN or web.authToken)', '127.0.0.1')
+  .option('--port <port>', 'bind port', '3927')
+  .action(async (options: { host: string; port: string }) => {
+    const port = Number(options.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error(`Invalid port: ${options.port}`);
+    }
+    const { runWebCli } = await import('./web/server.js');
+    await runWebCli({
+      host: options.host,
+      port,
+      configPath: configPath(),
+    });
+  });
+
 program.parseAsync().catch((error: unknown) => {
   console.error(error instanceof Error ? error.message : String(error));
   process.exitCode = 1;
@@ -191,28 +258,47 @@ function createJob(
   template: JobConfig['template'],
   options: { time?: string; document?: string; model?: string },
 ): JobConfig {
+  const isReport = template !== 'dev-log';
+  const reportTitle = template === 'daily-report'
+    ? 'Codex 日报'
+    : template === 'weekly-report' ? 'Codex 周报' : 'Codex 月报';
   const markdown = {
     type: 'markdown' as const,
     directory: `~/.local/share/internflow/${template}`,
-    filename: template === 'daily-report' ? '{date}.md' : '{date}.operations.json',
+    filename: isReport ? '{date}.md' : '{date}.operations.json',
+    archive: isReport,
   };
   const sinks: JobConfig['sinks'] = [markdown];
   if (options.document) {
     sinks.push({
       type: 'lark',
       document: options.document,
-      mode: template === 'dev-log' ? 'section-append' : 'append',
+      identity: 'user',
+      reader: template === 'dev-log' ? 'larkparser' : 'lark-cli',
+      // 日报兼容旧脚本：用本地历史报告重建整份文档；需求记录仍只做章节追加。
+      mode: template === 'dev-log' ? 'section-append' : 'history-replace',
+      ...(isReport ? { title: reportTitle } : {}),
     });
   }
   return {
     enabled: true,
     template,
     schedule: {
-      time: options.time || (template === 'daily-report' ? '23:30' : '23:45'),
-      days: ['mon', 'tue', 'wed', 'thu', 'fri'],
+      time: options.time || (
+        template === 'daily-report' ? '23:30'
+          : template === 'weekly-report' ? '23:40'
+            : template === 'monthly-report' ? '23:50' : '23:45'
+      ),
+      days: template === 'weekly-report' ? ['fri'] : ['mon', 'tue', 'wed', 'thu', 'fri'],
+      dateOffsetDays: 0,
+      runOn: template === 'monthly-report' ? 'last-workday' : 'scheduled-day',
     },
-    source: { type: 'codex' },
-    generator: { type: 'codex', model: options.model || null },
+    skipDates: [],
+    source: { type: 'codex', dayEndTime: '23:30' },
+    generator: {
+      type: 'codex',
+      model: options.model || (isReport ? 'gpt-5.6-sol' : null),
+    },
     sinks,
   };
 }
@@ -258,11 +344,15 @@ async function doctor(online = false): Promise<Array<{ ok: boolean; message: str
   const checkedSources = new Set<string>();
   for (const [jobName, value] of Object.entries(config.jobs)) {
     const sessionsDir = expandHome(value.source.sessionsDir || join(homedir(), '.codex', 'sessions'));
-    if (checkedSources.has(sessionsDir)) continue;
-    checkedSources.add(sessionsDir);
+    const sessionDirs = value.source.sessionsDir
+      ? [sessionsDir]
+      : [sessionsDir, join(homedir(), '.codex', 'archived_sessions')].filter(existsSync);
+    const sourceKey = sessionDirs.join('\n');
+    if (checkedSources.has(sourceKey)) continue;
+    checkedSources.add(sourceKey);
     checks.push({
-      ok: await canRead(sessionsDir),
-      message: `${jobName}: Codex sessions: ${sessionsDir}`,
+      ok: (await Promise.all(sessionDirs.map(canRead))).every(Boolean),
+      message: `${jobName}: Codex sessions: ${sessionDirs.join(', ')}`,
     });
   }
 
@@ -334,7 +424,9 @@ function errorMessage(error: unknown): string {
 }
 
 function formatSchedule(job: JobConfig): string {
-  return `${job.schedule.days.join(',')} ${job.schedule.time}`;
+  const offset = job.schedule.dateOffsetDays ?? 0;
+  const runOn = job.schedule.runOn === 'last-workday' ? ' last-workday' : '';
+  return `${job.schedule.days.join(',')} ${job.schedule.time}${runOn}${offset ? ` target${offset}d` : ''}`;
 }
 
 function localDate(date: Date, timezone: string): string {

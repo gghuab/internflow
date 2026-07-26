@@ -8,13 +8,13 @@ import { stateDirectory } from '../../core/paths.js';
 import { runCommand } from '../../core/process.js';
 
 const LAUNCHD_WEEKDAY: Record<DayName, number> = {
-  sun: 1,
-  mon: 2,
-  tue: 3,
-  wed: 4,
-  thu: 5,
-  fri: 6,
-  sat: 7,
+  sun: 0,
+  mon: 1,
+  tue: 2,
+  wed: 3,
+  thu: 4,
+  fri: 5,
+  sat: 6,
 };
 
 export interface LaunchdInstallOptions {
@@ -86,8 +86,9 @@ export function generateLaunchdPlist(
   const label = options.label || labelForJob(options.jobName);
   const logDir = options.logDir || join(stateDirectory(), 'logs');
   const [hour, minute] = options.job.schedule.time.split(':').map(Number);
+  const triggerOffset = -(options.job.schedule.dateOffsetDays ?? 0);
   const intervals = options.job.schedule.days.map((day) => `    <dict>
-      <key>Weekday</key><integer>${LAUNCHD_WEEKDAY[day]}</integer>
+      <key>Weekday</key><integer>${LAUNCHD_WEEKDAY[shiftDay(day, triggerOffset)]}</integer>
       <key>Hour</key><integer>${hour}</integer>
       <key>Minute</key><integer>${minute}</integer>
     </dict>`).join('\n');
@@ -133,6 +134,12 @@ ${intervals}
 </dict>
 </plist>
 `;
+}
+
+function shiftDay(day: DayName, offset: number): DayName {
+  const days: DayName[] = ['sun', 'mon', 'tue', 'wed', 'thu', 'fri', 'sat'];
+  const index = days.indexOf(day);
+  return days[(index + offset + days.length) % days.length] || day;
 }
 
 export function labelForJob(jobName: string): string {
