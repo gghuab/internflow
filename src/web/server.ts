@@ -13,6 +13,8 @@ import {
   WebRequestError,
 } from './request-guard.js';
 import { renderUiPage } from './ui.js';
+import { renderWorkspacePage } from './workspace-ui.js';
+import { getWorkspaceViews } from './workspace.js';
 import { getDecisionAudits } from './decision-audits.js';
 import { isValidLocalDate } from '../core/calendar.js';
 
@@ -123,6 +125,11 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<{
         return;
       }
 
+      if (method === 'GET' && (url.pathname === '/workspace' || url.pathname === '/workspace/')) {
+        sendHtml(res, renderWorkspacePage());
+        return;
+      }
+
       if (method === 'GET' && url.pathname === '/favicon.ico') {
         res.writeHead(204, { 'cache-control': 'public, max-age=86400' });
         res.end();
@@ -167,6 +174,15 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<{
           ...(job ? { job } : {}),
           ...(policyId ? { policyId } : {}),
           ...(outcome ? { outcome } : {}),
+          ...(configPath ? { configPath } : {}),
+        });
+        sendJson(res, 200, responseBody(result, auth.required));
+        return;
+      }
+
+      if (method === 'GET' && url.pathname === '/api/workspaces') {
+        if (url.search) throw new WebRequestError(400, 'Query parameters are not allowed.');
+        const result = await getWorkspaceViews({
           ...(configPath ? { configPath } : {}),
         });
         sendJson(res, 200, responseBody(result, auth.required));

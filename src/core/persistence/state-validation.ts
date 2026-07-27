@@ -62,15 +62,35 @@ function isOutputArtifact(value: unknown): value is OutputArtifact {
   if (value.kind === 'markdown') {
     return 'markdown' in value && typeof value.markdown === 'string';
   }
-  if (value.kind !== 'records' || !('records' in value) || !Array.isArray(value.records)) return false;
-  return value.records.every((record) => Boolean(
-    record
-    && typeof record === 'object'
-    && 'section' in record
-    && ['requirement', 'bugfix', 'insight'].includes(String(record.section))
-    && 'targetRef' in record
-    && typeof record.targetRef === 'string'
-    && 'markdown' in record
-    && typeof record.markdown === 'string',
-  ));
+  if (value.kind === 'workspace') {
+    return 'candidates' in value
+      && Array.isArray(value.candidates)
+      && value.candidates.every((candidate) => Boolean(
+        candidate
+        && typeof candidate === 'object'
+        && 'date' in candidate
+        && typeof candidate.date === 'string'
+        && 'workItemId' in candidate
+        && typeof candidate.workItemId === 'string'
+        && 'subjectKey' in candidate
+        && typeof candidate.subjectKey === 'string'
+        && 'contentFingerprint' in candidate
+        && typeof candidate.contentFingerprint === 'string'
+        && 'evidenceIds' in candidate
+        && Array.isArray(candidate.evidenceIds),
+      ));
+  }
+  return value.kind === 'records'
+    && 'records' in value
+    && Array.isArray(value.records)
+    && value.records.every((record) => Boolean(
+      record
+      && typeof record === 'object'
+      && 'section' in record
+      && ['overview', 'requirement', 'bugfix', 'insight'].includes(String(record.section))
+      && 'targetRef' in record
+      && typeof record.targetRef === 'string'
+      && 'markdown' in record
+      && typeof record.markdown === 'string',
+    ));
 }

@@ -1,13 +1,19 @@
 import type { GeneratorConfig, SinkConfig, SourceConfig } from '../config.js';
 import type { ActivityBatch, ActivitySourceBatch } from './activity.js';
 import type { RunContext } from './run.js';
+import type {
+  DevLogSection,
+  DevLogTargetRole,
+  DevLogWriteOperation,
+} from './workday.js';
+import type { WorkspaceCandidate } from './workspace.js';
 
 export interface HeadingReference {
   ref: string;
   blockId: string;
   level: number;
   text: string;
-  section: 'requirement' | 'bugfix' | 'insight' | null;
+  section: DevLogSection | null;
 }
 
 export interface SinkSnapshot {
@@ -17,18 +23,24 @@ export interface SinkSnapshot {
 }
 
 export interface AppendRecord {
-  section: 'requirement' | 'bugfix' | 'insight';
+  section: DevLogSection;
   targetRef: string;
   markdown: string;
+  operation?: DevLogWriteOperation;
+  role?: DevLogTargetRole;
   evidenceIds?: string[];
   candidateId?: string;
+  candidateIds?: string[];
   subjectKey?: string;
+  subjectHeading?: string;
+  bindSubject?: boolean;
   contentFingerprint?: string;
 }
 
 export type OutputArtifact =
   | { kind: 'markdown'; markdown: string; rawMarkdown?: string }
-  | { kind: 'records'; records: AppendRecord[] };
+  | { kind: 'records'; records: AppendRecord[] }
+  | { kind: 'workspace'; candidates: WorkspaceCandidate[] };
 
 export interface SourcePlugin {
   name: SourceConfig['type'];

@@ -67,6 +67,23 @@ export function renderUiPage(): string {
       margin-bottom: 28px;
     }
 
+    .topbar-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .workspace-link {
+      color: var(--ink);
+      text-decoration: none;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 12px;
+    }
+
+    .workspace-link:hover { border-color: var(--signal); }
+
     .brand {
       display: flex;
       align-items: center;
@@ -669,7 +686,10 @@ export function renderUiPage(): string {
           <p>把今天的 Codex 会话整理成结构化日报</p>
         </div>
       </div>
-      <div class="pill"><span class="dot"></span><span id="conn">localhost ready</span></div>
+      <div class="topbar-actions">
+        <a class="workspace-link" href="/workspace">Engineering Memory</a>
+        <div class="pill"><span class="dot"></span><span id="conn">localhost ready</span></div>
+      </div>
     </div>
 
     <section class="hero">
@@ -1070,7 +1090,7 @@ export function renderUiPage(): string {
 
     function renderDevlogRecords(records) {
       els.devlogPaper.classList.remove('loading');
-      const order = ['requirement', 'bugfix', 'insight'];
+      const order = ['overview', 'requirement', 'bugfix', 'insight'];
       const groups = {};
       for (const record of records) {
         (groups[record.section] = groups[record.section] || []).push(record);
@@ -1082,6 +1102,7 @@ export function renderUiPage(): string {
             '<div class="target">' +
               '<span class="arrow">└─▸</span>' +
               '<span class="heading">' + escapeHtml(record.targetHeading || '(未匹配到标题)') + '</span>' +
+              '<span class="ev">' + escapeHtml(record.operation || 'append') + '</span>' +
               (record.evidenceCount ? '<span class="ev">evidence ×' + record.evidenceCount + '</span>' : '') +
             '</div>' +
             '<div class="markdown">' + markdownToHtml(record.markdown || '') + '</div>' +

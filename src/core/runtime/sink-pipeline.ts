@@ -96,6 +96,8 @@ export async function applySinks(options: {
 function sinkIdentity(sink: InternFlowConfig['jobs'][string]['sinks'][number]): string {
   const target = sink.type === 'lark'
     ? { type: sink.type, document: sink.document, profile: sink.profile || '', mode: sink.mode }
-    : { type: sink.type, directory: sink.directory, filename: sink.filename };
+    : sink.type === 'workspace'
+      ? { type: sink.type, id: sink.id, directory: sink.directory }
+      : { type: sink.type, directory: sink.directory, filename: sink.filename };
   return createHash('sha256').update(JSON.stringify(target)).digest('hex').slice(0, 16);
 }

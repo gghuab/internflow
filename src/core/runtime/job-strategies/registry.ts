@@ -3,6 +3,7 @@ import type { ArtifactStore, StateStore } from '../../persistence/index.js';
 import { createDailyStrategy } from './daily.js';
 import { createDevLogStrategy } from './dev-log.js';
 import { createPeriodStrategy } from './period.js';
+import { createWorkspaceStrategy } from './workspace.js';
 import type { JobStrategy } from './types.js';
 
 export function createJobStrategy(
@@ -22,6 +23,7 @@ export function createJobStrategy(
     'weekly-report': () => createPeriodStrategy('week', options.artifacts, options.date, options.dryRun),
     'monthly-report': () => createPeriodStrategy('month', options.artifacts, options.date, options.dryRun),
     'dev-log': () => createDevLogStrategy(options),
+    'workspace': () => createWorkspaceStrategy(),
   };
   return factories[template]();
 }

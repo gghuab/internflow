@@ -1,7 +1,9 @@
 import type { GeneratorPlugin, SinkPlugin, SourcePlugin } from '../contracts/index.js';
 import { CodexGenerator } from '../../plugins/generators/codex.js';
+import { LocalGenerator } from '../../plugins/generators/local.js';
 import { LarkSink } from '../../plugins/sinks/lark.js';
 import { MarkdownSink } from '../../plugins/sinks/markdown.js';
+import { WorkspaceSink } from '../../plugins/sinks/workspace.js';
 import { CodexSource } from '../../sessions/codex/index.js';
 
 export class PluginRegistry {
@@ -12,8 +14,10 @@ export class PluginRegistry {
   constructor() {
     this.sources.set('codex', new CodexSource());
     this.generators.set('codex', new CodexGenerator());
+    this.generators.set('local', new LocalGenerator());
     this.sinks.set('markdown', new MarkdownSink());
     this.sinks.set('lark', new LarkSink());
+    this.sinks.set('workspace', new WorkspaceSink());
   }
 
   source(name: string): SourcePlugin {

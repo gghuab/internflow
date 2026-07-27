@@ -25,7 +25,11 @@ export class MarkdownSink implements SinkPlugin {
     const path = join(directory, filename);
     const content = artifact.kind === 'markdown'
       ? artifact.markdown
-      : `${JSON.stringify({ records: artifact.records }, null, 2)}\n`;
+      : `${JSON.stringify(
+        artifact.kind === 'records' ? { records: artifact.records } : artifact,
+        null,
+        2,
+      )}\n`;
 
     await mkdir(directory, { recursive: true });
     await atomicWrite(path, content);

@@ -109,7 +109,7 @@ export class LarkSink implements SinkPlugin {
     const headings = new Map(snapshot.headings.map((heading) => [heading.ref, heading]));
     const resolvedRecords = artifact.records.map((record) => {
       const heading = headings.get(record.targetRef);
-      if (!heading || heading.level < 2 || heading.level > 4 || heading.section !== record.section) {
+      if (!heading || heading.level < 2 || heading.level > 5 || heading.section !== record.section) {
         throw new Error(`Unknown or mismatched heading ref: ${record.targetRef}`);
       }
       return { record, heading };
@@ -119,38 +119,43 @@ export class LarkSink implements SinkPlugin {
     const currentOutline = await fetchDocument(executable, lark, 'outline', 'xml');
     assertHeadingsUnchanged(snapshot.headings, parseOutline(currentOutline.content));
 
-    const prepared = [];
+    const updates: Array<Record<string, unknown>> = [];
     for (const { record, heading } of resolvedRecords) {
       const section = await fetchSection(executable, lark, heading.blockId);
-      prepared.push({
-        record,
-        heading,
-        anchorBlockId: lastBlockId(section.content, heading.blockId),
-        revisionId: section.revisionId,
-      });
-    }
+      const operation = record.operation || 'append';
+      const preparedMarkdown = prepareLarkMarkdown(record.markdown);
+      const firstHeading = firstMarkdownHeading(preparedMarkdown);
+      if ((operation === 'append' || operation === 'create')
+        && firstHeading
+        && sectionContainsHeading(section.content, firstHeading.level, firstHeading.text)) {
+        updates.push({
+          targetRef: record.targetRef,
+          operation,
+          anchorBlockId: heading.blockId,
+          applied: false,
+          alreadyApplied: true,
+        });
+        continue;
+      }
 
-    const updates: Array<Record<string, unknown>> = [];
-    for (let index = 0; index < prepared.length; index += 1) {
-      const item = prepared[index];
-      if (!item) continue;
-      const { record, heading } = item;
-      const section = index === 0 || context.dryRun
-        ? { revisionId: item.revisionId, anchorBlockId: item.anchorBlockId }
-        : await fetchSectionAnchor(executable, lark, heading.blockId);
-      const response = !context.dryRun
-        ? await updateDocument(
-          executable,
-          lark,
-          'block_insert_after',
-          section.anchorBlockId,
-          prepareLarkMarkdown(record.markdown),
-          section.revisionId,
-        )
-        : null;
+      const response = context.dryRun
+        ? null
+        : operation === 'replace'
+          ? await replaceSection(executable, lark, heading, section, preparedMarkdown)
+          : await updateDocument(
+            executable,
+            lark,
+            'block_insert_after',
+            lastBlockId(section.content, heading.blockId),
+            preparedMarkdown,
+            section.revisionId,
+          );
       updates.push({
         targetRef: record.targetRef,
-        anchorBlockId: section.anchorBlockId,
+        operation,
+        anchorBlockId: operation === 'replace'
+          ? heading.blockId
+          : lastBlockId(section.content, heading.blockId),
         applied: !context.dryRun,
         response,
       });
@@ -249,10 +254,37 @@ export function splitHistoryMarkdown(markdown: string): string[] {
 
 /** Mermaid 围栏在飞书 Markdown 中只是代码块，发布前转换成可直接渲染的画板。 */
 export function prepareLarkMarkdown(markdown: string): string {
-  return markdown.replace(
+  return compactLarkBlockSpacing(markdown).replace(
     /^```mermaid[\t ]*\r?\n([\s\S]*?)^```[\t ]*$/gim,
     (_match, source: string) => `<whiteboard type="mermaid">\n${escapeXmlText(source.trim())}\n</whiteboard>`,
   );
+}
+
+function compactLarkBlockSpacing(markdown: string): string {
+  const lines = markdown.replace(/\r\n?/g, '\n').split('\n');
+  const result: string[] = [];
+  let inFence = false;
+  for (let index = 0; index < lines.length;) {
+    const line = lines[index] || '';
+    if (line.trim()) {
+      result.push(line);
+      if (/^```/.test(line)) inFence = !inFence;
+      index += 1;
+      continue;
+    }
+    let end = index;
+    while (end < lines.length && !lines[end]?.trim()) end += 1;
+    const previous = result.at(-1) || '';
+    const next = lines[end] || '';
+    // 飞书会把标题或代码围栏旁的 Markdown 空行渲染成独立空段落。
+    const fenceBoundary = /^```/.test(previous) || /^```/.test(next);
+    const headingBoundary = !inFence
+      && (/^#{1,6}\s+/.test(previous) || /^#{1,6}\s+/.test(next));
+    if (inFence && !fenceBoundary) result.push(...lines.slice(index, end));
+    else if (!fenceBoundary && !headingBoundary) result.push('');
+    index = end;
+  }
+  return result.join('\n');
 }
 
 function escapeXmlText(value: string): string {
@@ -317,12 +349,54 @@ async function fetchSection(
   return documentFromResponse(result.stdout, `fetch section ${headingId}`);
 }
 
+async function replaceSection(
+  executable: string,
+  config: LarkConfig,
+  heading: HeadingReference,
+  section: { content: string; revisionId: number },
+  markdown: string,
+): Promise<LarkResponse> {
+  assertReplaceableSection(section.content, heading.blockId);
+  const oldBlockIds = topLevelBlockIds(section.content);
+  if (oldBlockIds[0] !== heading.blockId) {
+    throw new Error(`Cannot resolve replaceable section for ${heading.blockId}.`);
+  }
+  if (oldBlockIds.length === 1) {
+    return updateDocument(
+      executable,
+      config,
+      'block_replace',
+      heading.blockId,
+      markdown,
+      section.revisionId,
+    );
+  }
+
+  // 先写入新内容再删除旧块；第二步失败时最多留下重复章节，不会先丢失原文。
+  const inserted = await updateDocument(
+    executable,
+    config,
+    'block_insert_after',
+    oldBlockIds.at(-1) || heading.blockId,
+    markdown,
+    section.revisionId,
+  );
+  return updateDocument(
+    executable,
+    config,
+    'block_delete',
+    oldBlockIds.join(','),
+    undefined,
+    updateRevision(inserted, section.revisionId),
+  );
+}
+
 async function updateDocument(
   executable: string,
   config: LarkConfig,
-  command: 'append' | 'block_insert_after',
+  command: 'append' | 'block_insert_after' | 'block_replace' | 'block_delete',
   blockId: string,
-  content: string,
+  content: string | undefined,
   revisionId: number,
 ): Promise<LarkResponse> {
   const args = [
@@ -337,18 +411,10 @@ async function updateDocument(
     command,
   ];
   if (blockId) args.push('--block-id', blockId);
-  args.push(
-    '--doc-format',
-    'markdown',
-    '--content',
-    '-',
-    '--revision-id',
-    String(revisionId),
-    '--as',
-    config.identity,
-  );
+  if (content !== undefined) args.push('--doc-format', 'markdown', '--content', '-');
+  args.push('--revision-id', String(revisionId), '--as', config.identity);
   const result = await runCommand(executable, args, {
-    input: content,
+    ...(content !== undefined ? { input: content } : {}),
     timeoutMs: 5 * 60_000,
     sensitiveOutput: true,
   });
@@ -357,6 +423,10 @@ async function updateDocument(
     throw new Error(`Lark ${command} failed: ${JSON.stringify(response.error || response)}`);
   }
   return response;
+}
+
+function updateRevision(response: LarkResponse, fallback: number): number {
+  return response.data?.document?.revision_id ?? fallback;
 }
 
 function documentFromResponse(output: string, label: string): { content: string; revisionId: number } {
@@ -390,9 +460,58 @@ export function parseOutline(xml: string): HeadingReference[] {
 }
 
 export function lastBlockId(xml: string, headingId: string): string {
-  const ids = [...xml.matchAll(/\bid="([^"]+)"/g)].map((match) => match[1] || '');
+  const ids = topLevelBlockIds(xml);
   if (!ids.length || ids[0] !== headingId) throw new Error(`Cannot resolve section end for ${headingId}.`);
   return ids.at(-1) || headingId;
+}
+
+export function topLevelBlockIds(xml: string): string[] {
+  const ids: string[] = [];
+  const identifiedAncestor: boolean[] = [];
+  for (const match of xml.matchAll(/<\/?([a-z][\w-]*)(?:\s[^<>]*?)?\/?>/gi)) {
+    const tag = match[0];
+    const closing = tag.startsWith('</');
+    const selfClosing = /\/>$/.test(tag);
+    if (closing) {
+      identifiedAncestor.pop();
+      continue;
+    }
+    const id = tag.match(/\bid="([^"]+)"/)?.[1];
+    const insideBlock = identifiedAncestor.at(-1) || false;
+    const isBlock = Boolean(id) && !insideBlock && match[1]?.toLowerCase() !== 'fragment';
+    if (isBlock && id) ids.push(id);
+    if (!selfClosing) identifiedAncestor.push(insideBlock || isBlock);
+  }
+  return ids;
+}
+
+function firstMarkdownHeading(markdown: string): { level: number; text: string } | null {
+  const match = markdown.match(/^(#{3,6})\s+(.+)$/m);
+  return match ? { level: match[1]?.length || 0, text: (match[2] || '').trim() } : null;
+}
+
+function sectionContainsHeading(xml: string, level: number, text: string): boolean {
+  const pattern = new RegExp(`<h${level}\\s+[^>]*>([\\s\\S]*?)<\\/h${level}>`, 'g');
+  const normalized = normalizeHeadingText(text);
+  return [...xml.matchAll(pattern)]
+    .some((match) => normalizeHeadingText(decodeXml(match[1] || '')) === normalized);
+}
+
+function normalizeHeadingText(value: string): string {
+  return value
+    .replace(/\\([`*_~])/g, '$1')
+    .replace(/[`*_~]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function assertReplaceableSection(xml: string, headingId: string): void {
+  if (/<(?:img|whiteboard|sheet|bitable|synced_reference|source|file|cite)\b/i.test(xml)) {
+    throw new Error(
+      `Refusing to replace ${headingId}: the section contains a resource block that must be preserved manually.`,
+    );
+  }
 }
 
 export function assertHeadingsUnchanged(
@@ -410,25 +529,22 @@ export function assertHeadingsUnchanged(
   }
 }
 
-async function fetchSectionAnchor(
-  executable: string,
-  config: LarkConfig,
-  headingId: string,
-): Promise<{ anchorBlockId: string; revisionId: number }> {
-  const section = await fetchSection(executable, config, headingId);
-  return {
-    anchorBlockId: lastBlockId(section.content, headingId),
-    revisionId: section.revisionId,
-  };
-}
-
 function sectionFromText(
   text: string,
   current: HeadingReference['section'],
 ): HeadingReference['section'] {
-  if (/^一、(?:需求开发档案|需求开发记录)/.test(text)) return 'requirement';
-  if (/^二、(?:问题定位与修复记录|联调问题与 Bug Fix 汇总)/.test(text)) return 'bugfix';
-  if (/^三、(?:工程方法与知识沉淀|个人沉淀)/.test(text)) return 'insight';
+  if (/^一、开发总览/.test(text)) {
+    return 'overview';
+  }
+  if (/^(?:一、(?:需求开发档案|需求开发记录)|二、需求开发记录)/.test(text)) {
+    return 'requirement';
+  }
+  if (/^(?:二、(?:问题定位与修复记录|联调问题与 Bug Fix 汇总)|三、问题与修复记录)/.test(text)) {
+    return 'bugfix';
+  }
+  if (/^(?:三、(?:工程方法与知识沉淀|个人沉淀)|四、工程经验沉淀)/.test(text)) {
+    return 'insight';
+  }
   return current;
 }
 

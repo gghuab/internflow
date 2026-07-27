@@ -41,6 +41,10 @@ export type {
 export type {
   DailyReportView,
   DevLogCandidate,
+  DevLogSection,
+  DevLogTargetRole,
+  DevLogWriteOperation,
+  DevLogWriteTarget,
   PeriodEntry,
   PeriodGroup,
   PeriodReportView,
@@ -54,3 +58,9 @@ export type {
   VisualMode,
   VisualPlanItem,
 } from './workday.js';
+export type {
+  WorkspaceCandidate,
+  WorkspaceEntry,
+  WorkspaceState,
+  WorkspaceSubject,
+} from './workspace.js';

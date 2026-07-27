@@ -1,8 +1,14 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
-import type { AppendRecord, DecisionAssessment, WorkEvidence } from '../../core/contracts/index.js';
+import type {
+  AppendRecord,
+  DecisionAssessment,
+  HeadingReference,
+  WorkEvidence,
+} from '../../core/contracts/index.js';
 import { withDecisionId } from '../../core/decision-audit.js';
+import type { DevLogSubjectBinding } from './document-index.js';
 import type { DevLogCandidate } from './types.js';
 
 interface SyncedEvidence {
@@ -16,6 +22,8 @@ interface SyncedEvidence {
 interface SyncedSubject {
   subjectKey: string;
   targetRef: string;
+  targetBlockId?: string;
+  targetHeading?: string;
   contentFingerprints: string[];
   lastRevision?: number;
   updatedAt: string;
@@ -73,16 +81,34 @@ export class DevLogEvidenceLedger {
   async subjectTargets(): Promise<Record<string, string>> {
     const data = await this.read();
     return Object.fromEntries(
-      Object.values(data.subjects).map((subject) => [subject.subjectKey, subject.targetRef]),
+      Object.values(data.subjects).flatMap((subject) => (
+        subject.targetBlockId ? [[subject.subjectKey, subject.targetBlockId]] : []
+      )),
+    );
+  }
+
+  async subjectBindings(): Promise<Record<string, DevLogSubjectBinding>> {
+    const data = await this.read();
+    return Object.fromEntries(
+      Object.values(data.subjects).flatMap((subject) => (
+        subject.targetBlockId || subject.targetHeading
+          ? [[subject.subjectKey, {
+            ...(subject.targetBlockId ? { blockId: subject.targetBlockId } : {}),
+            ...(subject.targetHeading ? { headingText: subject.targetHeading } : {}),
+          }]]
+          : []
+      )),
     );
   }
 
   async markSynced(
     records: AppendRecord[],
     documentRevision?: number,
+    headings: HeadingReference[] = [],
   ): Promise<void> {
     const data = await this.read();
     const syncedAt = new Date().toISOString();
+    const headingsByRef = new Map(headings.map((heading) => [heading.ref, heading]));
     for (const record of records) {
       for (const evidenceId of record.evidenceIds || []) {
         data.evidence[evidenceId] = {
@@ -92,11 +118,20 @@ export class DevLogEvidenceLedger {
           syncedAt,
         };
       }
-      if (record.subjectKey && record.contentFingerprint) {
+      const bindSubject = record.bindSubject !== false && record.section !== 'overview';
+      if (bindSubject && record.subjectKey && record.contentFingerprint) {
         const existing = data.subjects[record.subjectKey];
+        const target = headingsByRef.get(record.targetRef);
+        const subjectHeading = target ? enclosingSubjectHeading(headings, target) : undefined;
+        const targetBlockId = record.operation !== 'create' && record.operation !== 'replace'
+          ? subjectHeading?.blockId || existing?.targetBlockId
+          : undefined;
+        const targetHeading = record.subjectHeading || subjectHeading?.text || existing?.targetHeading;
         data.subjects[record.subjectKey] = {
           subjectKey: record.subjectKey,
           targetRef: record.targetRef,
+          ...(targetBlockId ? { targetBlockId } : {}),
+          ...(targetHeading ? { targetHeading } : {}),
           contentFingerprints: [...new Set([
             ...(existing?.contentFingerprints || []),
             record.contentFingerprint,
@@ -140,4 +175,18 @@ export class DevLogEvidenceLedger {
       throw error;
     }
   }
+}
+
+function enclosingSubjectHeading(
+  headings: HeadingReference[],
+  target: HeadingReference,
+): HeadingReference | undefined {
+  if (target.level === 3) return target;
+  const index = headings.indexOf(target);
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    const heading = headings[cursor];
+    if (!heading || heading.level < 3) return undefined;
+    if (heading.level === 3) return heading;
+  }
+  return undefined;
 }
