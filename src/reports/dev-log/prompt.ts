@@ -45,6 +45,7 @@ export function devLogPrompt(batch: ActivityBatch, snapshot: SinkSnapshot): stri
 - 只有脱离具体需求、具备独立现象、影响、根因、修复和验证价值的线上或联调缺陷，才归入 bugfix。
 - operation=create 表示在分类根节点创建新条目；append 表示保留原文并追加；replace 表示输出该小节的完整最新版本。
 - replace 必须保留目标小节中仍然有效的原有事实，只删除被当天证据明确推翻的内容，再合并当天新增事实；不得因输入只包含当天增量而丢掉历史仍有效内容。
+- candidate.status 只描述当天工作项，不等于长期需求生命周期；当天子任务 completed 不能关闭旧阻塞或把整个需求改成已完成，除非 facts 或 verificationSummary 明确证明旧问题已解决。
 - 多个候选指向同一 subjectHeading 时，replace 目标只会挂在其中一个候选下，但正文要综合同一 subjectHeading 的全部当天候选事实。
 
 正式文档分为四部分：

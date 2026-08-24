@@ -14,6 +14,11 @@ export const DEV_LOG_APPEND_MARGIN = 0.15;
 export const DEV_LOG_REQUIREMENT_AFFINITY_THRESHOLD = 0.8;
 export const DEV_LOG_REQUIREMENT_AFFINITY_MARGIN = 0.08;
 
+const GENERIC_SIMILARITY_TERMS = [
+  '需求', '开发', '功能', '问题', '修复', '调整', '修改', '实现',
+  '新增', '完成', '处理', '模块', '代码', '记录', '日志', '迭代',
+];
+
 interface DocumentTarget {
   heading: HeadingReference;
   target: HeadingReference;
@@ -93,13 +98,33 @@ export function resolveDevLogCandidates(
       }];
     }
 
-    const nativeAlternatives = targets
+    const branch = candidate.branch;
+    const exactBranchTargets = branch
+      ? targets.filter((target) => (
+        target.heading.section === candidate.section
+        && target.fullText.includes(branch)
+      ))
+      : [];
+    const scoredNativeAlternatives = targets
       .filter((target) => target.heading.section === candidate.section)
-      .map((target) => scoreTarget(candidate, target))
-      .sort((left, right) => right.score - left.score || left.targetRef.localeCompare(right.targetRef));
+      .map((target) => scoreTarget(candidate, target));
+    const branchAlternative = exactBranchTargets.length === 1
+      ? scoredNativeAlternatives.find((item) => item.subjectRef === exactBranchTargets[0]?.heading.ref)
+      : undefined;
+    // 分支只能确认“连续性”，仍需基本语义相似度，避免复用分支时把无关需求串组。
+    const exactBranchRef = branchAlternative
+      && branchAlternative.score >= DEV_LOG_APPEND_THRESHOLD
+      ? branchAlternative.subjectRef
+      : undefined;
+    const nativeAlternatives = scoredNativeAlternatives
+      .sort((left, right) => (
+        Number(right.subjectRef === exactBranchRef) - Number(left.subjectRef === exactBranchRef)
+        || right.score - left.score
+        || left.targetRef.localeCompare(right.targetRef)
+      ));
     const nativeBest = nativeAlternatives[0];
-    const nativeMargin = alternativeMargin(nativeAlternatives);
-    const nativeMatch = isConfidentAppend(nativeBest, nativeMargin);
+    const nativeMargin = exactBranchRef ? 1 : alternativeMargin(nativeAlternatives);
+    const nativeMatch = Boolean(exactBranchRef) || isConfidentAppend(nativeBest, nativeMargin);
     const requirementAlternatives = candidate.section === 'bugfix' && !nativeMatch
       ? targets
         .filter((target) => target.heading.section === 'requirement')
@@ -118,7 +143,7 @@ export function resolveDevLogCandidates(
     const root = roots.find((heading) => heading.section === routedCandidate.section);
     if (!root) return [];
 
-    const operation = requirementMatch || isConfidentAppend(best, margin)
+    const operation = exactBranchRef || requirementMatch || isConfidentAppend(best, margin)
       ? 'append'
       : 'create';
     const suggestedTargetRef = operation === 'append' && best ? best.targetRef : root.ref;
@@ -146,9 +171,11 @@ export function resolveDevLogCandidates(
       margin,
       requirementMatch
         ? '问题修复与已有需求的业务目标和代码范围高度一致，作为需求内增量写入'
+        : exactBranchRef
+          ? '文档中只有一个需求精确记录了相同开发分支，沿用该稳定需求'
         : operation === 'append'
           ? '最佳目标达到相似度门槛，且与次优目标差距足够明确'
-        : '没有唯一可信的已有主题，保守地在对应分类下新建记录',
+          : '没有唯一可信的已有主题，保守地在对应分类下新建记录',
       alternatives,
     );
     assessments.push(assessment);
@@ -235,10 +262,10 @@ function isRequirementAffinity(best: Alternative | undefined, margin: number): b
 function scoreTarget(candidate: DevLogCandidate, target: DocumentTarget): Alternative {
   const semanticFacts = candidate.facts.filter(isSemanticFact).slice(0, 6);
   const candidateText = [candidate.title, ...semanticFacts].join('\n');
-  const businessGoal = calibrate(Math.max(
-    titleSimilarity(candidate.title, target.heading.text),
-    bestTextSimilarity([candidate.title, ...semanticFacts], `${target.heading.text}\n${target.stableText}`),
-  ), 0.45);
+  const titleMatch = titleSimilarity(candidate.title, target.heading.text);
+  const factMatch = bestTextSimilarity(semanticFacts, `${target.heading.text}\n${target.stableText}`);
+  // 单句对话只能辅助标题，不能独自把“同仓库、不同需求”推过追加门槛。
+  const businessGoal = calibrate(Math.max(titleMatch, factMatch * 0.5), 0.45);
   const codeScope = calibrate(scopeSimilarity(candidate, target.fullText), 0.65);
   const history = calibrate(
     bestTextSimilarity([candidateText, candidate.title, ...semanticFacts], target.fullText),
@@ -703,14 +730,15 @@ function textSimilarity(left: string, right: string): number {
 }
 
 function tokenize(value: string): string[] {
-  const normalized = String(value || '').toLowerCase().replace(/[^a-z0-9_./\u3400-\u9fff-]+/g, ' ');
+  let normalized = String(value || '').toLowerCase().replace(/[^a-z0-9_./\u3400-\u9fff-]+/g, ' ');
+  // 先移除通用词再切中文二元词，避免“功能开发”残留“能开”造成虚假相似。
+  for (const generic of GENERIC_SIMILARITY_TERMS) {
+    normalized = normalized.replaceAll(generic, ' ');
+  }
   const result = new Set(normalized.match(/[a-z0-9][a-z0-9_./-]+/g) || []);
   for (const word of normalized.match(/[a-z0-9][a-z0-9_-]+/g) || []) result.add(word);
   for (const chunk of normalized.match(/[\u3400-\u9fff]{2,}/g) || []) {
     for (let index = 0; index < chunk.length - 1; index += 1) result.add(chunk.slice(index, index + 2));
-  }
-  for (const generic of ['需求', '开发', '功能', '问题', '修复', '调整', '修改', '实现', '新增', '完成', '处理', '模块', '代码', '记录', '日志', '迭代']) {
-    result.delete(generic);
   }
   return [...result];
 }

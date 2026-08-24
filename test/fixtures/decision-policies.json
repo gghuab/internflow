@@ -1,0 +1,62 @@
+{
+  "version": 1,
+  "devLogAdmission": [
+    {
+      "name": "personal-grok2api",
+      "item": {
+        "id": "grok2api",
+        "kind": "feature",
+        "title": "grok2api 本机模型接入",
+        "goal": "配置本机 grok2api 与 xAI 模型接入",
+        "files": ["work/grok2api/config.yaml", "/Users/example/Library/LaunchAgents/grok2api.plist"]
+      },
+      "expectedSection": null
+    },
+    {
+      "name": "business-checkin-feature",
+      "item": {
+        "id": "checkin-feature",
+        "kind": "feature",
+        "title": "打卡活动审核字段透传",
+        "goal": "为打卡活动审核接口增加业务字段透传",
+        "files": ["apps/checkin/src/api/review.ts"]
+      },
+      "expectedSection": "requirement"
+    }
+  ],
+  "visual": [
+    {
+      "id": "simple",
+      "goal": "调整一个配置值",
+      "actions": ["修改版本号"],
+      "decisions": [],
+      "files": ["config/ci.json"],
+      "expectedMode": "none"
+    },
+    {
+      "id": "flow",
+      "goal": "梳理跨模块审核分支",
+      "actions": ["读取请求", "判断审核分支", "调用领域服务", "写回审核结果"],
+      "decisions": ["失败时保持原值", "并发写回需要保护"],
+      "files": ["src/api/review.ts", "src/domain/audit.ts"],
+      "expectedMode": "flowchart"
+    },
+    {
+      "id": "state",
+      "goal": "整理发布状态机与状态转换",
+      "actions": ["读取当前状态", "判断转换事件", "写入目标状态", "校验生命周期"],
+      "decisions": ["非法转换保持原状态"],
+      "files": ["src/state/machine.ts", "src/release/lifecycle.ts"],
+      "expectedMode": "state"
+    },
+    {
+      "id": "sequence",
+      "goal": "梳理客户端与服务端回调链",
+      "actions": ["客户端发起请求", "服务端校验参数", "外部服务返回结果", "客户端消费响应"],
+      "decisions": ["回调失败进入重试队列"],
+      "files": ["src/client/request.ts", "src/server/handler.ts", "src/queue/retry.ts"],
+      "expectedMode": "sequence"
+    }
+  ],
+  "expectedFullDiagramCount": 3
+}

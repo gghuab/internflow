@@ -1,0 +1,10 @@
+{
+  "activities": [{ "id": "verify", "rootSessionId": "verify", "cwd": "/workspace/app", "gitBranch": "feat/api", "firstUserMessage": "实现接口并完成测试", "changedFiles": ["src/api.ts"] }],
+  "evidence": [
+    { "id": "verify-request", "kind": "request", "status": "confirmed", "sourceEventIds": ["event-verify-request"] },
+    { "id": "verify-change", "kind": "change", "status": "confirmed", "sourceEventIds": ["event-verify-change"] },
+    { "id": "verify-fail", "kind": "error", "status": "confirmed", "sourceEventIds": ["event-verify-fail"] },
+    { "id": "verify-pass", "kind": "verification", "status": "confirmed", "sourceEventIds": ["event-verify-pass"] }
+  ],
+  "expected": { "sourceEventCount": 4, "workItemCount": 1, "finalVerification": "passed", "blockerCount": 0, "dailyIncluded": true, "devLogIncluded": true }
+}

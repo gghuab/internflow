@@ -97,7 +97,10 @@ function sectionFor(item: WorkItem, text: string): {
     return { section: 'bugfix', score, signals, message: '问题修复具备真实改动，进入 Bug-fix 汇总' };
   }
   if ((item.kind === 'feature' || item.kind === 'refactor')
-    && hasChange && (item.kind !== 'refactor' || hasPassedVerification) && score >= 6) {
+    && hasChange
+    // 持续需求分支或已有提交可以证明重构归属；零散重构仍要求当天验证通过。
+    && (item.kind !== 'refactor' || hasPassedVerification || deliveryReference)
+    && score >= 6) {
     return { section: 'requirement', score, signals, message: '产品交付语义达到需求开发记录准入门槛' };
   }
   if (item.decisions.length && hasPassedVerification && item.kind === 'research') {

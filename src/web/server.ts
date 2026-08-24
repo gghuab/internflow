@@ -1,4 +1,7 @@
+import { readFile } from 'node:fs/promises';
 import { createServer, type ServerResponse } from 'node:http';
+import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
 import {
   generateDailyReportPreview,
   generateDevLogPreview,
@@ -24,6 +27,14 @@ export interface WebServerOptions {
   configPath?: string;
 }
 
+const localRequire = createRequire(import.meta.url);
+const markedRoot = dirname(localRequire.resolve('marked/package.json'));
+const webScripts = new Map([
+  ['/assets/marked.js', join(markedRoot, 'lib', 'marked.umd.js')],
+  ['/assets/dompurify.js', localRequire.resolve('dompurify/dist/purify.min.js')],
+  ['/assets/mermaid.js', localRequire.resolve('mermaid/dist/mermaid.min.js')],
+]);
+
 function sendJson(res: ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
@@ -39,6 +50,16 @@ function sendHtml(res: ServerResponse, html: string): void {
     'cache-control': 'no-store',
   });
   res.end(html);
+}
+
+async function sendWebScript(res: ServerResponse, path: string): Promise<void> {
+  const payload = await readFile(path);
+  res.writeHead(200, {
+    'content-type': 'text/javascript; charset=utf-8',
+    'cache-control': 'public, max-age=86400',
+    'x-content-type-options': 'nosniff',
+  });
+  res.end(payload);
 }
 
 function responseBody(body: unknown, remote: boolean): unknown {
@@ -127,6 +148,13 @@ export async function startWebServer(options: WebServerOptions = {}): Promise<{
 
       if (method === 'GET' && (url.pathname === '/workspace' || url.pathname === '/workspace/')) {
         sendHtml(res, renderWorkspacePage());
+        return;
+      }
+
+      const webScript = webScripts.get(url.pathname);
+      if (method === 'GET' && webScript) {
+        if (url.search) throw new WebRequestError(400, 'Query parameters are not allowed.');
+        await sendWebScript(res, webScript);
         return;
       }
 

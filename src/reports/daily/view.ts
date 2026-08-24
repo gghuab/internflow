@@ -1,10 +1,18 @@
 import type { SourceConfig } from '../../core/config.js';
-import type { CaptureSummary, DecisionAssessment } from '../../core/contracts/index.js';
+import type {
+  CaptureSummary,
+  DailyPresentationPlanItem,
+  DecisionAssessment,
+} from '../../core/contracts/index.js';
 import { withDecisionId } from '../../core/decision-audit.js';
 import { isMetaMaintenanceText, matchesConfiguredText } from '../../core/source-filter.js';
 import type { WorkItem } from '../../work-items/types.js';
 import type { DailyReportView } from './types.js';
 import { allocateVisualPlan, evaluateVisualNeed } from './visual-policy.js';
+
+const DELIVERY_RECORD_PATTERN = /\bgit\s+(?:commit|push)\b|\b(?:gh\s+pr|glab\s+mr)\s+create\b|已提交|已推送|已创建\s*(?:PR|MR)|已合入|已发布|已交付/i;
+const MANUAL_VALIDATION_MEDIUM_PATTERN = /真机|二维码|预览|截图|盲测|人工\s*(?:QA|验收|验证|复核)|评审|对比|SVG\s*校验|方向语义复核|ok\s*[:=]\s*true/i;
+const MANUAL_VALIDATION_RESULT_PATTERN = /已(?:完成|通过|确认|复核|校验|验收)|已经(?:完成|通过|确认)|(?:检查|测试|验证|盲测|评审|复核|校验|验收)(?:结果)?(?:为|已|已经)?(?:全部|全)?(?:通过|完成|确认)|严格多数|获得多数|无告警|ok\s*[:=]\s*true/i;
 
 export function projectDailyWorkItems(
   workItems: WorkItem[],
@@ -36,6 +44,8 @@ export function projectDailyWorkItems(
   assessments.push(...visual.map((item) => item.assessment));
   const reportId = items[0]?.startedAt.slice(0, 10) || 'unknown-date';
   const visualBudget = allocateVisualPlan(visual, reportId);
+  const deepDiveCandidateIds = deepDive.filter((item) => item.value).map((item) => item.item.id);
+  const takeawayCandidateIds = takeaway.filter((item) => item.value).map((item) => item.item.id);
   assessments.push(visualBudget.assessment);
   assessments.push(withDecisionId({
     kind: 'assessment' as const, policyId: 'daily.longest', policyVersion: '1.0.0',
@@ -66,8 +76,9 @@ export function projectDailyWorkItems(
           ? '多个可靠工作项耗时相差不超过 1 分钟'
           : '按目标日期内可靠活跃时长排名',
     excludedUnreliableCount,
-    deepDiveCandidateIds: deepDive.filter((item) => item.value).map((item) => item.item.id),
-    takeawayCandidateIds: takeaway.filter((item) => item.value).map((item) => item.item.id),
+    deepDiveCandidateIds,
+    takeawayCandidateIds,
+    presentationPlan: items.map(presentationFor),
     visualPlan: visualBudget.plan,
     quality: {
       coverage: capture?.coverage || 'high',
@@ -76,16 +87,51 @@ export function projectDailyWorkItems(
   };
 }
 
+function presentationFor(item: WorkItem): DailyPresentationPlanItem {
+  if (item.changes.length) {
+    return { workItemId: item.id, detailLevel: 'full', reason: '存在代码或配置改动' };
+  }
+  if (hasDeliveryRecord(item)) {
+    return { workItemId: item.id, detailLevel: 'full', reason: '存在 Commit 或交付记录' };
+  }
+  if (item.verifications.length) {
+    return { workItemId: item.id, detailLevel: 'full', reason: '存在结构化验证结果' };
+  }
+  if (item.decisions.length || item.blockers.length) {
+    return { workItemId: item.id, detailLevel: 'full', reason: '存在关键决策或阻塞项' };
+  }
+  if (item.activeMinutes !== null && item.activeMinutes >= 15) {
+    return { workItemId: item.id, detailLevel: 'full', reason: '可靠活跃时间不少于 15 分钟' };
+  }
+  return { workItemId: item.id, detailLevel: 'brief', reason: '轻量事项，压缩展示以保留信息密度' };
+}
+
+/** Commit 元数据可能只是会话基线，必须有明确交付结果才能作为交付证据。 */
+export function hasDeliveryRecord(item: WorkItem): boolean {
+  return item.outcomes.some((value) => DELIVERY_RECORD_PATTERN.test(value));
+}
+
+/** 没有 Shell 命令时，真机、盲测和人工验收仍属于可复核验证证据。 */
+export function manualValidationFacts(item: WorkItem): string[] {
+  return [...new Set([...item.outcomes, ...item.decisions]
+    .filter((value) => MANUAL_VALIDATION_MEDIUM_PATTERN.test(value))
+    // “准备截图”“将重新盲测”只是计划，不得被渲染成已完成验证。
+    .filter((value) => MANUAL_VALIDATION_RESULT_PATTERN.test(value)))];
+}
+
 function evaluateContent(item: WorkItem, type: 'deep-dive' | 'takeaway') {
   const crossModule = new Set(item.changes.flatMap((change) => change.files)
     .map((file) => file.split('/').slice(0, -1).join('/'))).size >= 2;
   const failThenPass = item.verifications.some((value) => value.outcome === 'passed' && value.evidenceIds.length > 1);
+  const hasManualValidation = manualValidationFacts(item).length > 0;
   const score = type === 'deep-dive'
     ? (item.kind === 'research' ? 3 : 0) + (item.decisions.length ? 2 : 0)
-      + (crossModule ? 1 : 0) + (failThenPass ? 2 : 0) + (item.actions.length >= 3 ? 1 : 0)
-      - (!item.decisions.length && item.kind !== 'research' ? 2 : 0)
+      + (crossModule ? 1 : 0) + (failThenPass ? 2 : 0) + (hasManualValidation ? 2 : 0)
+      + (item.actions.length >= 3 ? 1 : 0)
+      - (!item.decisions.length && item.kind !== 'research' && !hasManualValidation ? 2 : 0)
     : (item.decisions.length ? 2 : 0) + (item.verifications.length ? 2 : 0)
-      + (item.actions.length >= 3 ? 2 : 0) + (item.blockers.length ? 1 : 0)
+      + (hasManualValidation ? 2 : 0) + (item.actions.length >= 3 ? 2 : 0)
+      + (item.blockers.length ? 1 : 0)
       - (item.actions.length <= 1 && !item.decisions.length ? 3 : 0);
   const included = score >= 4;
   return {
@@ -110,12 +156,13 @@ function itemAssessment(
 ): DecisionAssessment {
   const evidence = item.evidenceIds.map((id) => ({ kind: 'work-evidence' as const, id }));
   return withDecisionId({
-    kind: 'assessment', policyId, policyVersion: '1.0.0',
+    kind: 'assessment', policyId, policyVersion: '2.1.0',
     subject: { kind: 'work-item', id: item.id }, outcome,
     confidence: item.confidence === 'confirmed' ? 'high' : 'medium', gates: [],
     signals: [
       { key: 'decision-count', value: item.decisions.length, message: `${item.decisions.length} 条明确决策` },
       { key: 'verification-count', value: item.verifications.length, message: `${item.verifications.length} 条验证记录` },
+      { key: 'manual-validation-count', value: manualValidationFacts(item).length, message: `${manualValidationFacts(item).length} 条人工或运行态验证` },
       { key: 'action-count', value: item.actions.length, message: `${item.actions.length} 条推进动作` },
     ],
     reasons: [{ code: `${policyId}.${outcome}`, message, evidence }], evidence,

@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
-import { StateStore } from '../src/core/state.js';
+import { StateStore } from '../src/core/persistence/index.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -26,27 +26,53 @@ describe('StateStore', () => {
     expect(await store.status('job:date:sink')).toBe('applied');
   });
 
-  it('allows force to retry pending state but never resets applied state', async () => {
+  it('only retries pending with the same artifact and never resets applied state', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'internflow-state-force-'));
     const path = join(directory, 'state.json');
     const store = new StateStore(path);
 
     await store.begin('job:date:sink', 'hash-1');
-    await store.begin('job:date:sink', 'hash-2', true);
+    await expect(store.begin('job:date:sink', 'hash-2', true)).rejects.toThrow(
+      'Refusing to mix run artifacts',
+    );
+    await store.begin('job:date:sink', 'hash-1', true);
     let state = JSON.parse(await readFile(path, 'utf8'));
-    expect(state.sinks['job:date:sink']).toMatchObject({ status: 'pending', hash: 'hash-2' });
+    expect(state.sinks['job:date:sink']).toMatchObject({ status: 'pending', hash: 'hash-1' });
 
-    await store.complete('job:date:sink', 'hash-2');
-    await store.begin('job:date:sink', 'hash-3', true);
+    await store.complete('job:date:sink', 'hash-1');
+    expect(await store.begin('job:date:sink', 'hash-3', true)).toBe('applied');
     state = JSON.parse(await readFile(path, 'utf8'));
-    expect(state.sinks['job:date:sink']).toMatchObject({ status: 'applied', hash: 'hash-2' });
+    expect(state.sinks['job:date:sink']).toMatchObject({ status: 'applied', hash: 'hash-1' });
+  });
+
+  it('stores a run artifact once and refuses to replace it with generated output', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'internflow-state-artifact-'));
+    const store = new StateStore(join(directory, 'state.json'));
+    const first = await store.saveArtifact({
+      job: 'daily-report',
+      date: '2026-07-15',
+      sourceCount: 2,
+      activityCount: 1,
+      artifact: { kind: 'markdown', markdown: '# first\n' },
+      snapshots: {},
+    });
+
+    expect((await store.artifact('daily-report', '2026-07-15'))?.hash).toBe(first.hash);
+    await expect(store.saveArtifact({
+      job: 'daily-report',
+      date: '2026-07-15',
+      sourceCount: 2,
+      activityCount: 1,
+      artifact: { kind: 'markdown', markdown: '# regenerated\n' },
+      snapshots: {},
+    })).rejects.toThrow('already has immutable artifact');
   });
 
   it('serializes read-modify-write updates from separate processes', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'internflow-state-concurrent-'));
     const path = join(directory, 'state.json');
     const gate = join(directory, 'start');
-    const moduleUrl = pathToFileURL(join(process.cwd(), 'src/core/state.ts')).href;
+    const moduleUrl = pathToFileURL(join(process.cwd(), 'src/core/persistence/state-store.ts')).href;
     const workers = Array.from({ length: 8 }, (_, index) => {
       const ready = join(directory, `ready-${index}`);
       const script = `

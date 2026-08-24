@@ -1,0 +1,42 @@
+{
+  "date": "2026-07-14",
+  "cases": [
+    {
+      "name": "cross-page-audio-question",
+      "goal": "问题有那种一次更改全部页面声效的办法吗",
+      "activityTitle": "分析全局声效配置",
+      "assistantMessages": ["分析了页面声效的统一配置方式。"],
+      "evidence": [
+        { "kind": "request", "summary": "问题有那种一次更改全部页面声效的办法吗" }
+      ],
+      "expectedTitle": "全部页面声效调整方案分析",
+      "expectedKind": "research",
+      "expectedStatus": "investigated"
+    },
+    {
+      "name": "development-history-summary",
+      "goal": "你根据最近的对话记录总结我的开发整个需求可以吗",
+      "activityTitle": "整理需求开发记录",
+      "assistantMessages": ["整理了需求开发过程和关键结论。"],
+      "evidence": [
+        { "kind": "request", "summary": "你根据最近的对话记录总结我的开发整个需求可以吗" }
+      ],
+      "expectedTitle": "需求开发复盘",
+      "expectedKind": "research",
+      "expectedStatus": "investigated"
+    },
+    {
+      "name": "branch-cleanup-delivery",
+      "goal": "帮我拉取最新的main到本地，然后删除croissant分支吧，因为已经上线了",
+      "activityTitle": "同步主分支并清理已上线分支",
+      "assistantMessages": ["已完成分支同步和清理。"],
+      "evidence": [
+        { "kind": "request", "summary": "拉取最新 main 并删除已上线分支" },
+        { "kind": "delivery", "summary": "已同步 main 并删除 croissant 分支" }
+      ],
+      "expectedTitle": "main更新",
+      "expectedKind": "operations",
+      "expectedStatus": "completed"
+    }
+  ]
+}

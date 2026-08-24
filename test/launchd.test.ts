@@ -21,7 +21,8 @@ describe('launchd scheduler', () => {
     });
 
     expect(plist).toContain(labelForJob('daily-report'));
-    expect(plist).toContain('<key>Weekday</key><integer>2</integer>');
+    // 周一 23:30 直接汇总周一，按用户的工作日截止点完成快照。
+    expect(plist).toContain('<key>Weekday</key><integer>1</integer>');
     expect(plist).toContain('<key>Hour</key><integer>23</integer>');
     expect(plist).toContain('<key>Minute</key><integer>30</integer>');
     expect(plist).toContain('<string>--scheduled</string>');

@@ -104,7 +104,7 @@ export function allocateVisualPlan(
   }
 
   const full = plan.filter((item) => item.mode !== 'inline');
-  const acceptedFull = new Set(full.slice(0, 6).map((item) => item.assessmentId));
+  const acceptedFull = new Set(full.slice(0, 3).map((item) => item.assessmentId));
   const constrainedPlan = plan.filter((item) => item.mode === 'inline' || acceptedFull.has(item.assessmentId));
   const trimmed = full.length - acceptedFull.size;
   const assessment = withDecisionId({
@@ -120,13 +120,13 @@ export function allocateVisualPlan(
     ],
     reasons: [{
       code: constrainedPlan.length ? 'daily.visual-budget.marginal-value' : 'daily.visual-budget.no-positive-value',
-      message: constrainedPlan.length ? '按边际信息增益选择互补图示，不使用固定业务数量' : '没有图示达到边际信息增益门槛',
+      message: constrainedPlan.length ? '按边际信息增益选择互补图示，并控制完整图数量' : '没有图示达到边际信息增益门槛',
       evidence: constrainedPlan.flatMap((item) => item.workItemId ? [{ kind: 'work-item' as const, id: item.workItemId }] : []),
     }],
     evidence: constrainedPlan.flatMap((item) => item.workItemId ? [{ kind: 'work-item' as const, id: item.workItemId }] : []),
     constraints: [{
       key: 'full-diagram-count', passed: trimmed === 0, action: trimmed ? 'trim' as const : 'accept' as const,
-      actual: full.length, limit: 6,
+      actual: full.length, limit: 3,
       message: trimmed ? `安全上限裁剪 ${trimmed} 个完整图；其内容价值评价仍保留` : '未触发完整图安全上限',
     }],
   });

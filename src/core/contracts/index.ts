@@ -39,6 +39,7 @@ export type {
   Evaluated,
 } from './decision.js';
 export type {
+  DailyPresentationPlanItem,
   DailyReportView,
   DevLogCandidate,
   DevLogSection,

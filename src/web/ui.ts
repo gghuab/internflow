@@ -577,7 +577,7 @@ export function renderUiPage(): string {
       font-family: "Literata", Georgia, serif;
       font-size: 15.5px;
       line-height: 1.7;
-      max-width: 68ch;
+      max-width: 100%;
     }
 
     .markdown h1 {
@@ -594,9 +594,33 @@ export function renderUiPage(): string {
       letter-spacing: -0.02em;
     }
 
+    .markdown h3 { margin: 22px 0 9px; font-size: 16px; }
+    .markdown h4 { margin: 18px 0 8px; font-size: 15px; }
     .markdown p { margin: 0 0 12px; }
     .markdown ul, .markdown ol { margin: 0 0 14px; padding-left: 1.3em; }
     .markdown li { margin: 0.25em 0; }
+    .markdown a { color: #176f69; }
+    .markdown hr {
+      border: 0;
+      border-top: 1px solid rgba(26, 36, 48, 0.14);
+      margin: 22px 0;
+    }
+    .markdown table {
+      width: 100%;
+      margin: 0 0 18px;
+      border-collapse: collapse;
+      font-family: "DM Sans", system-ui, sans-serif;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    .markdown th,
+    .markdown td {
+      border: 1px solid rgba(26, 36, 48, 0.14);
+      padding: 8px 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+    .markdown th { background: rgba(26, 36, 48, 0.06); font-weight: 600; }
     .markdown code {
       font-family: "JetBrains Mono", monospace;
       font-size: 0.88em;
@@ -620,6 +644,23 @@ export function renderUiPage(): string {
       padding: 8px 14px;
       border-left: 3px solid rgba(26, 36, 48, 0.2);
       color: #425466;
+    }
+    .mermaid-preview {
+      width: 100%;
+      min-height: 120px;
+      margin: 10px 0 18px;
+      padding: 16px;
+      overflow-x: auto;
+      border: 1px solid rgba(26, 36, 48, 0.12);
+      border-radius: 8px;
+      background: #fff;
+      text-align: center;
+    }
+    .mermaid-preview svg { display: block; width: 100%; height: auto; margin: 0 auto; }
+    .mermaid-error {
+      min-height: 0;
+      color: #9b3d38;
+      font: 13px "DM Sans", system-ui, sans-serif;
     }
 
     .raw {
@@ -806,6 +847,9 @@ export function renderUiPage(): string {
     </section>
   </div>
 
+  <script src="/assets/marked.js"></script>
+  <script src="/assets/dompurify.js"></script>
+  <script src="/assets/mermaid.js"></script>
   <script>
     const els = {
       conn: document.getElementById('conn'),
@@ -876,68 +920,56 @@ export function renderUiPage(): string {
         .replaceAll('"', '&quot;');
     }
 
-    function renderInline(text) {
-      return escapeHtml(text)
-        .replace(/\`([^\`]+)\`/g, '<code>$1</code>')
-        .replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>')
-        .replace(/\\*([^*]+)\\*/g, '<em>$1</em>');
+    let mermaidReady = false;
+
+    // 兼容历史日报中的空段写法；新 renderer 已不再生成该标签。
+    function normalizePreviewMarkdown(md) {
+      return String(md || '').replace(
+        /^[ \\t]*<p>\\s*<br\\s*\\/?>(?:\\s*)<\\/p>[ \\t]*$/gim,
+        '',
+      );
     }
 
     function markdownToHtml(md) {
-      const lines = md.replace(/\\r\\n?/g, '\\n').split('\\n');
-      const html = [];
-      let inList = false;
-      let inCode = false;
-      let code = [];
+      const source = normalizePreviewMarkdown(md);
+      const html = window.marked.parse(source, { gfm: true, breaks: false });
+      // 日报内容来自模型，进入 innerHTML 前统一清洗，不能依赖生成端自觉。
+      return window.DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
+    }
 
-      const closeList = () => {
-        if (inList) { html.push('</ul>'); inList = false; }
-      };
-
-      for (const line of lines) {
-        if (line.startsWith('\`\`\`')) {
-          if (inCode) {
-            html.push('<pre><code>' + escapeHtml(code.join('\\n')) + '</code></pre>');
-            code = [];
-            inCode = false;
-          } else {
-            closeList();
-            inCode = true;
-          }
-          continue;
-        }
-        if (inCode) { code.push(line); continue; }
-
-        if (/^#\\s+/.test(line)) {
-          closeList();
-          html.push('<h1>' + renderInline(line.replace(/^#\\s+/, '')) + '</h1>');
-          continue;
-        }
-        if (/^##\\s+/.test(line)) {
-          closeList();
-          html.push('<h2>' + renderInline(line.replace(/^##\\s+/, '')) + '</h2>');
-          continue;
-        }
-        if (/^###\\s+/.test(line)) {
-          closeList();
-          html.push('<h3>' + renderInline(line.replace(/^###\\s+/, '')) + '</h3>');
-          continue;
-        }
-        if (/^[-*]\\s+/.test(line)) {
-          if (!inList) { html.push('<ul>'); inList = true; }
-          html.push('<li>' + renderInline(line.replace(/^[-*]\\s+/, '')) + '</li>');
-          continue;
-        }
-        if (!line.trim()) {
-          closeList();
-          continue;
-        }
-        closeList();
-        html.push('<p>' + renderInline(line) + '</p>');
+    async function renderMermaidDiagrams(root) {
+      const blocks = [...root.querySelectorAll('pre > code.language-mermaid')];
+      if (!blocks.length) return;
+      if (!mermaidReady) {
+        window.mermaid.initialize({
+          startOnLoad: false,
+          securityLevel: 'strict',
+          theme: 'neutral',
+          flowchart: { htmlLabels: false },
+          themeVariables: {
+            fontFamily: '"DM Sans", system-ui, sans-serif',
+            primaryColor: '#f4efe4',
+            primaryTextColor: '#1a2430',
+            primaryBorderColor: '#5d6b78',
+            lineColor: '#3e6f74',
+          },
+        });
+        mermaidReady = true;
       }
-      closeList();
-      if (inCode) html.push('<pre><code>' + escapeHtml(code.join('\\n')) + '</code></pre>');
-      return html.join('');
+
+      for (const block of blocks) {
+        const source = block.textContent || '';
+        const preview = document.createElement('div');
+        preview.className = 'mermaid mermaid-preview';
+        preview.textContent = source;
+        block.parentElement.replaceWith(preview);
+        try {
+          await window.mermaid.run({ nodes: [preview], suppressErrors: true });
+        } catch {
+          preview.className = 'mermaid-preview mermaid-error';
+          preview.textContent = '图示暂时无法预览';
+        }
+      }
     }
 
     function setBannerOn(node, type, text) {
@@ -1037,6 +1069,7 @@ export function renderUiPage(): string {
         node.innerHTML = '<p style="color:#5d6b78;font-family:\\'DM Sans\\',sans-serif;">没有生成内容。</p>';
       } else {
         node.innerHTML = markdownToHtml(md);
+        void renderMermaidDiagrams(node);
       }
       els.raw.textContent = md || '';
       // Keep session stats when generation fails with empty activities.
@@ -1117,6 +1150,7 @@ export function renderUiPage(): string {
         );
       }).join('');
       els.devlogPaper.innerHTML = html || '<div class="markdown"><p style="color:#5d6b78;font-family:\\'DM Sans\\',sans-serif;">没有生成内容。</p></div>';
+      void renderMermaidDiagrams(els.devlogPaper);
     }
 
     async function generateDevlog() {

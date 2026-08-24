@@ -159,7 +159,15 @@ function assembleOne(
     ...(commits.length ? { commits } : {}),
     kind,
     status,
-    title: inferWorkItemTitle(goal, outcomes, files, kind, activities.map((item) => item.title)),
+    // 标题来自稳定分支或工作事实，不把外部会话标题直接透传到日报和需求档案。
+    title: inferWorkItemTitle(
+      goal,
+      outcomes,
+      files,
+      kind,
+      activities.flatMap((activity) => activity.userMessages),
+      branch,
+    ),
     goal,
     actions: unique([
       ...changes.map((item) => compactFact(item.summary)),

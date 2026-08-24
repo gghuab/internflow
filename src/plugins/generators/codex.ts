@@ -68,8 +68,11 @@ export class CodexGenerator implements GeneratorPlugin {
     const executable = await resolveExecutable('codex', config.executable);
     if (!executable) {
       if (context.job.template === 'daily-report') {
-        const fallback = buildFallbackDailyReport(batch);
-        return { kind: 'markdown', markdown: fallback, rawMarkdown: fallback };
+        return dailyFallbackOrThrow(
+          context,
+          batch,
+          new Error('Codex CLI was not found. Run `internflow doctor`.'),
+        );
       }
       if (isPeriodReport(context.job.template)) {
         const fallback = buildFallbackPeriodReport(batch);
@@ -90,8 +93,6 @@ export class CodexGenerator implements GeneratorPlugin {
       : isPeriodReport(context.job.template)
         ? periodReportPrompt(batch)
         : dailyReportPrompt(batch);
-    await rm(outputPath, { force: true });
-
     const args = [
       'exec',
       '--ephemeral',
@@ -114,23 +115,37 @@ export class CodexGenerator implements GeneratorPlugin {
     if (model) args.push('--model', model);
     args.push('-');
 
-    let output: string;
+    let output = '';
     // Prompt 只走 stdin，避免会话和文档正文出现在进程参数列表中。
     try {
-      await runCommand(executable, args, {
-        cwd: runDir,
-        input: prompt,
-        timeoutMs: 15 * 60 * 1000,
-        sensitiveOutput: true,
-      });
-      output = (await readFile(outputPath, 'utf8')).trim();
-      if (!output) throw new Error('Codex did not write a report.');
+      const maxAttempts = context.job.template === 'dev-log' ? 2 : 1;
+      let lastError: unknown;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        // 每次重试前清理旧结果，避免把半成品当成新输出。
+        await rm(outputPath, { force: true });
+        try {
+          await runCommand(executable, args, {
+            cwd: runDir,
+            input: prompt,
+            timeoutMs: 15 * 60 * 1000,
+            sensitiveOutput: true,
+          });
+          output = (await readFile(outputPath, 'utf8')).trim();
+          if (!output) throw new Error('Codex did not write a report.');
+          lastError = undefined;
+          break;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      if (lastError) throw lastError;
     } catch (error) {
       if (context.job.template === 'dev-log') throw error;
+      if (context.job.template === 'daily-report') {
+        return dailyFallbackOrThrow(context, batch, error);
+      }
       // 模型失败时仍由本地事实渲染器输出完整报告，不丢工作项。
-      const fallback = isPeriodReport(context.job.template)
-        ? buildFallbackPeriodReport(batch)
-        : buildFallbackDailyReport(batch);
+      const fallback = buildFallbackPeriodReport(batch);
       await writeFile(outputPath, fallback, { encoding: 'utf8', mode: 0o600 });
       return { kind: 'markdown', markdown: fallback, rawMarkdown: fallback };
     }
@@ -143,9 +158,8 @@ export class CodexGenerator implements GeneratorPlugin {
         const draft = validateDailyDraft(batch.dailyView, parsed.data);
         const markdown = renderDailyReport(batch, batch.dailyView, draft);
         return { kind: 'markdown', markdown, rawMarkdown: markdown };
-      } catch {
-        const fallback = buildFallbackDailyReport(batch);
-        return { kind: 'markdown', markdown: fallback, rawMarkdown: fallback };
+      } catch (error) {
+        return dailyFallbackOrThrow(context, batch, error);
       }
     }
 
@@ -171,6 +185,23 @@ export class CodexGenerator implements GeneratorPlugin {
       records: validateCandidateRecords(result.data.records, batch, snapshot || {}),
     };
   }
+}
+
+function dailyFallbackOrThrow(
+  context: RunContext,
+  batch: ActivityBatch,
+  cause: unknown,
+): OutputArtifact {
+  const writesToLark = context.job.sinks.some((sink) => sink.type === 'lark');
+  // 正式同步不允许把对话拼接的回退稿冒充 AI 日报。
+  if (!context.dryRun && writesToLark) {
+    throw new Error(
+      'Codex 日报生成失败，已阻止回退稿写入飞书。请恢复网络后重试。',
+      { cause },
+    );
+  }
+  const fallback = buildFallbackDailyReport(batch);
+  return { kind: 'markdown', markdown: fallback, rawMarkdown: fallback };
 }
 
 function isPeriodReport(template: RunContext['job']['template']): boolean {

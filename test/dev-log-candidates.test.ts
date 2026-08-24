@@ -38,6 +38,19 @@ describe('dev log candidate projection', () => {
     expect(projectDevLogCandidates([item({ kind: 'refactor', changes: [change()] })])).toEqual([]);
   });
 
+  it('keeps an unverified refactor increment when a feature branch proves requirement continuity', () => {
+    const result = projectDevLogCandidates([item({
+      kind: 'refactor',
+      branch: 'feat/launch-activity-refactor',
+      changes: [change()],
+    })]);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      section: 'requirement',
+      title: '功能实现',
+    });
+  });
+
   it('keeps personal tooling in the daily report instead of treating it as a requirement', () => {
     const assessments = [];
     const result = projectDevLogCandidates([item({
@@ -98,6 +111,38 @@ describe('dev log candidate projection', () => {
     expect(resolved).toMatchObject({ operation: 'append' });
     expect(resolved?.allowedTargetRefs).toContain('h-changes');
     expect(assessments).toContainEqual(expect.objectContaining({ id: resolved?.routingAssessmentId, outcome: 'append' }));
+  });
+
+  it('prefers the only exact branch match over a closer conversational title', () => {
+    const [candidate] = projectDevLogCandidates([item({
+      kind: 'refactor',
+      title: 'launch-activity代码重构',
+      goal: '重构活动创建页 V2',
+      branch: 'feat/launch-activity-refactor',
+      actions: ['更新活动创建页分层计划'],
+      changes: [{ ...change(), files: ['src/launch-activity/plan.md'] }],
+    })]);
+    expect(candidate).toBeDefined();
+    if (!candidate) return;
+
+    const [resolved] = resolveDevLogCandidates([candidate], {
+      markdown: `### REQ-006｜分支重构
+活动创建页 V2 重构分支为 feat/launch-activity-refactor，计划位于 src/launch-activity/plan.md。
+#### 变更记录
+### REQ-008｜common 与 页面代码重构
+src/launch-activity/plan.md`,
+      headings: [
+        { ref: 'requirements', blockId: 'requirements', level: 2, text: '二、需求开发记录', section: 'requirement' },
+        { ref: 'req-6', blockId: 'req-6', level: 3, text: 'REQ-006｜分支重构', section: 'requirement' },
+        { ref: 'changes-6', blockId: 'changes-6', level: 4, text: '变更记录', section: 'requirement' },
+        { ref: 'req-8', blockId: 'req-8', level: 3, text: 'REQ-008｜common 与 页面代码重构', section: 'requirement' },
+      ],
+    }, {}, [], '2026-07-28');
+
+    expect(resolved).toMatchObject({
+      operation: 'append',
+      subjectHeading: 'REQ-006｜分支重构',
+    });
   });
 
   it('keeps a strongly matched requirement fix inside the requirement instead of creating an ISSUE', () => {
@@ -352,6 +397,49 @@ apps/interest-chat-group-activity/src/pages/check-in/rank-list/components/RankCo
     }));
   });
 
+  it('does not route product code to an unrelated policy record through a broad app path', () => {
+    const [candidate] = projectDevLogCandidates([item({
+      kind: 'feature',
+      title: 'registration功能开发',
+      goal: '前端拼接报名详情私信参数',
+      branch: 'feat/registration-refactor',
+      actions: ['目录移动已完成，Container 从 registration-summary 导入'],
+      changes: [{
+        ...change(),
+        files: [
+          'apps/interest-mini-app/src/sub-packages/activity/registration-v2/container/registration-summary/index.tsx',
+          'apps/interest-mini-app/src/sub-packages/activity/registration/components/RegistryBottomBar/index.tsx',
+        ],
+      }],
+    })]);
+    expect(candidate).toBeDefined();
+    if (!candidate) return;
+
+    const snapshot = {
+      markdown: `### REQ-007｜restore-experiment-branch-flow 功能开发
+开放实验逻辑目录 apps/interest-mini-app/src/**，继续保护接口、路由与构建配置。
+#### 核心实现
+plugins/interest-aiden-agent/skills/designer-development-workflow/scripts/pre-write-guard.mjs
+#### 变更记录
+##### 2026-08-04｜开放实验逻辑的目录级写入流程`,
+      headings: [
+        { ref: 'root', blockId: 'root', level: 2, text: '二、需求开发记录', section: 'requirement' },
+        { ref: 'policy', blockId: 'policy', level: 3, text: 'REQ-007｜restore-experiment-branch-flow 功能开发', section: 'requirement' },
+        { ref: 'implementation', blockId: 'implementation', level: 4, text: '核心实现', section: 'requirement' },
+        { ref: 'changes', blockId: 'changes', level: 4, text: '变更记录', section: 'requirement' },
+      ],
+    };
+    const [resolved] = resolveDevLogCandidates([candidate], snapshot, {}, [], '2026-08-17');
+
+    // 宽泛的应用目录不是业务归属证据，报名页应新建独立需求。
+    expect(scoreDevLogTargets(candidate, snapshot)[0]?.indicators.businessGoal).toBeLessThan(0.5);
+    expect(resolved).toMatchObject({
+      operation: 'create',
+      subjectHeading: 'REQ-008｜registration功能开发',
+      allowedTargetRefs: ['root'],
+    });
+  });
+
   it('scores five explainable indicators with the configured 35/25/20/10/10 weights', () => {
     const [base] = projectDevLogCandidates([item({
       kind: 'feature',
@@ -436,6 +524,7 @@ commit: 8c459885
     expect(prompt).toContain('文档注释，非源码');
     expect(prompt).toContain('Mermaid');
     expect(prompt).toContain('不能因为标题中出现“修复”就自动归到 bugfix');
+    expect(prompt).toContain('candidate.status 只描述当天工作项');
   });
 });
 

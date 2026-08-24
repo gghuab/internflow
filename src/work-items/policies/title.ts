@@ -16,22 +16,43 @@ export function inferWorkItemTitle(
   outcomes: string[],
   files: string[],
   kind: WorkItemKind,
-  fallbackTitles: string[] = [],
+  contextTexts: string[] = [],
+  branch = '',
 ): string {
   const cleanedGoal = cleanSentence(goal);
   const goalTitle = actionableTitle(cleanedGoal, kind, QUESTION.test(goal));
   const outcomeTitle = bestOutcomeTitle(outcomes, kind);
   const scopedTitle = fileTitle(files, kind);
-  const cleanedFallbacks = fallbackTitles.map(cleanSentence);
-  const fallbackTitle = cleanedFallbacks
-    .map((value) => actionableTitle(value, kind, QUESTION.test(value)))
-    .find(Boolean)
-    || cleanedFallbacks.find((value) => isInformativeDirectTitle(value) && !QUESTION.test(value))
-    || '';
   const topicTitle = topicTitleFromText(cleanedGoal, kind);
+  const contextTitle = contextScopeTitle(contextTexts, kind);
+  const stableBranchTitle = branchTitle(branch, kind);
 
-  const title = goalTitle || scopedTitle || outcomeTitle || fallbackTitle || topicTitle || fallbackLabel(kind);
+  const title = contextTitle || stableBranchTitle || goalTitle || scopedTitle || outcomeTitle || topicTitle || fallbackLabel(kind);
   return limitTitle(title);
+}
+
+function contextScopeTitle(values: string[], kind: WorkItemKind): string {
+  const counts = new Map<string, number>();
+  for (const value of values) {
+    // 从多轮请求中提取反复出现的业务页面名，而不是采用任意一轮的整句会话标题。
+    const scopes = new Set([...value.matchAll(/([\p{Script=Han}]{2})创建页/gu)].map((match) => `${match[1]}创建页`));
+    for (const scope of scopes) counts.set(scope, (counts.get(scope) || 0) + 1);
+  }
+  const scope = [...counts].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))[0]?.[0];
+  if (!scope) return '';
+  return `${scope}${kind === 'refactor' ? '重构' : kindLabel(kind)}`;
+}
+
+function branchTitle(value: string, kind: WorkItemKind): string {
+  const branch = value.trim().toLowerCase().replace(/^refs\/heads\//, '');
+  if (!branch || ['main', 'master', 'develop', 'development', 'trunk'].includes(branch)) return '';
+  const scope = branch
+    .replace(/^(?:feat|feature|fix|bugfix|refactor|chore|docs|test)\//, '')
+    .replace(/(?:^|[-_/])(?:refactor|rework|feature|fix|bugfix|chore|docs|test)(?=$|[-_/])/g, '-')
+    .replace(/^[-_/]+|[-_/]+$/g, '')
+    .replace(/[-_/]+/g, '-');
+  if (!scope) return '';
+  return `${scope}${kindLabel(kind)}`;
 }
 
 function actionableTitle(goal: string, kind: WorkItemKind, questionContext = false): string {

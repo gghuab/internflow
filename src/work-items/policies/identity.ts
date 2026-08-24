@@ -16,9 +16,12 @@ export function subjectKeyFor(input: SubjectInput): string {
   const repositoryKey = normalizeValue(input.repositoryKey) || 'unknown-repository';
   const branch = normalizeBranch(input.branch || '');
   const branchScope = DEFAULT_BRANCHES.has(branch) ? '' : branch;
+  // 非默认分支本身就是跨会话、跨日期最稳定的需求身份；文件和措辞只描述单次推进。
+  if (branchScope) return stableHash(`${repositoryKey}|branch:${branchScope}`);
+
   const fileScope = stableFileScope(input.files);
   const topic = stableTopic(input.goal);
-  const scope = [branchScope, fileScope, topic].filter(Boolean).join('|')
+  const scope = [fileScope, topic].filter(Boolean).join('|')
     || normalizeValue(input.fallbackKey || '')
     || 'unknown-subject';
   return stableHash(`${repositoryKey}|${scope}`);

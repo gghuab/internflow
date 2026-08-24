@@ -62,8 +62,15 @@ export interface DailyReportView {
   excludedUnreliableCount: number;
   deepDiveCandidateIds: string[];
   takeawayCandidateIds: string[];
+  presentationPlan: DailyPresentationPlanItem[];
   visualPlan: VisualPlanItem[];
   quality: { coverage: 'high' | 'partial' | 'low'; reasons: string[] };
+}
+
+export interface DailyPresentationPlanItem {
+  workItemId: string;
+  detailLevel: 'full' | 'brief';
+  reason: string;
 }
 
 export type VisualMode = 'inline' | 'flowchart' | 'sequence' | 'state';

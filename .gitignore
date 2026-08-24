@@ -7,3 +7,12 @@ coverage/
 .env.*
 !.env.example
 
+# Local browser and generated report artifacts
+.playwright-cli/
+output/
+exports/
+
+# Local planning and validation notes
+docs/plans/
+docs/superpowers/plans/
+docs/validation/

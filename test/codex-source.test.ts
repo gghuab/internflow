@@ -3,10 +3,29 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { createStarterConfig } from '../src/core/config.js';
-import type { RunContext } from '../src/core/types.js';
-import { CodexSource } from '../src/plugins/sources/codex.js';
+import type { RunContext } from '../src/core/contracts/index.js';
+import { CodexSource } from '../src/sessions/codex/index.js';
+import { discoverSessionFiles } from '../src/sessions/codex/storage/files.js';
 
 describe('CodexSource', () => {
+  it('discovers active and archived sessions without counting the same rollout twice', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'internflow-session-roots-'));
+    const active = join(root, 'sessions');
+    const archived = join(root, 'archived_sessions');
+    await mkdir(active);
+    await mkdir(archived);
+    await writeFile(join(active, 'rollout-active.jsonl'), '{}\n');
+    await writeFile(join(active, 'rollout-moving.jsonl'), '{}\n');
+    await writeFile(join(archived, 'rollout-archived.jsonl'), '{}\n');
+    await writeFile(join(archived, 'rollout-moving.jsonl'), '{}\n');
+
+    const files = await discoverSessionFiles([active, archived], '2026-07-15');
+
+    expect(files).toHaveLength(3);
+    expect(files).toContain(join(active, 'rollout-moving.jsonl'));
+    expect(files).not.toContain(join(archived, 'rollout-moving.jsonl'));
+  });
+
   it('parses current custom tool calls and patch changes without leaking secrets', async () => {
     const root = await mkdtemp(join(tmpdir(), 'internflow-sessions-'));
     const directory = join(root, '2026', '07', '15');
@@ -51,6 +70,13 @@ describe('CodexSource', () => {
       event('2026-07-15T01:02:00.000Z', 'event_msg', {
         type: 'patch_apply_end', changes: { '/workspace/project/src/app.ts': { type: 'update' } },
       }),
+      event('2026-07-15T01:03:00.000Z', 'event_msg', {
+        type: 'exec_command_end',
+        command: ['git', 'status', '--short'],
+        cwd: '/workspace/project',
+        exit_code: 0,
+        aggregated_output: 'M  src/app.ts\ntoken=legacy-secret',
+      }),
       '{broken json',
     ];
     await writeFile(join(directory, 'rollout-session-1.jsonl'), `${events.join('\n')}\n`);
@@ -91,6 +117,7 @@ describe('CodexSource', () => {
     const serialized = JSON.stringify(result.activities[0]);
     for (const secret of [
       'top-secret',
+      'legacy-secret',
       'env-secret',
       'aws-secret-access-key',
       'ssh-private-key',
@@ -108,13 +135,15 @@ describe('CodexSource', () => {
       expect(serialized).not.toContain(secret);
     }
 
-    const minimalResult = await new CodexSource().collect(context, {
+    const privateResult = await new CodexSource().collect(context, {
       type: 'codex',
       sessionsDir: root,
       sessionIndex: join(root, 'index.jsonl'),
+      includeAssistantMessages: false,
+      includeToolOutput: false,
     });
-    expect(minimalResult.activities[0]?.assistantMessages).toEqual([]);
-    expect(minimalResult.activities[0]?.commands[0]?.output).toBe('');
+    expect(privateResult.activities[0]?.assistantMessages).toEqual([]);
+    expect(privateResult.activities[0]?.commands.every((command) => command.output === '')).toBe(true);
   });
 });
 

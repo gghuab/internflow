@@ -1,0 +1,11 @@
+{
+  "activities": [
+    { "id": "session-a", "rootSessionId": "session-a", "cwd": "/workspace/app", "gitBranch": "feat/api", "firstUserMessage": "新增用户接口字段", "changedFiles": ["src/api.ts"] },
+    { "id": "session-b", "rootSessionId": "session-b", "cwd": "/workspace/app", "gitBranch": "feat/api", "firstUserMessage": "继续完善用户接口字段", "changedFiles": ["src/api.ts"] }
+  ],
+  "evidence": [
+    { "id": "cross-a", "kind": "request", "status": "confirmed", "sourceEventIds": ["event-cross-a"] },
+    { "id": "cross-b", "kind": "change", "status": "confirmed", "sourceEventIds": ["event-cross-b"] }
+  ],
+  "expected": { "sourceEventCount": 2, "workItemCount": 1, "dailyIncluded": true, "devLogIncluded": true }
+}

@@ -1,0 +1,5 @@
+{
+  "activities": [{ "id": "learning", "rootSessionId": "learning", "cwd": "/workspace/app", "gitBranch": "main", "firstUserMessage": "分析 TypeScript 编译流程", "changedFiles": [] }],
+  "evidence": [{ "id": "learning-request", "kind": "request", "status": "confirmed", "sourceEventIds": ["event-learning-request"] }],
+  "expected": { "sourceEventCount": 1, "workItemCount": 1, "dailyIncluded": true, "devLogIncluded": false }
+}

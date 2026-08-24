@@ -1,0 +1,44 @@
+{
+  "date": "2026-07-13",
+  "cases": [
+    {
+      "name": "component-feature-with-final-lint-failure",
+      "goal": "合进来的还新增了一个loadermore组件",
+      "activityTitle": "完善排行榜加载交互",
+      "assistantMessages": [],
+      "evidence": [
+        { "kind": "request", "summary": "合进来的还新增了一个loadermore组件" },
+        { "kind": "change", "summary": "修改排行榜列表", "files": ["src/pages/rank-list/index.tsx"] },
+        { "kind": "error", "summary": "eslint 失败", "files": ["src/pages/rank-list/index.tsx"], "verification": { "command": "eslint src/pages/rank-list/index.tsx", "exitCode": 1, "outcome": "failed" } }
+      ],
+      "expectedTitle": "loadermore组件新增",
+      "expectedKind": "feature",
+      "expectedStatus": "blocked"
+    },
+    {
+      "name": "vague-fix-request-uses-file-scope",
+      "goal": "直接开始修复吧",
+      "activityTitle": "修复本地网络脚本",
+      "assistantMessages": [],
+      "evidence": [
+        { "kind": "request", "summary": "直接开始修复吧" },
+        { "kind": "change", "summary": "修改修复脚本", "files": ["work/set-feishu-repair-hosts.sh"] }
+      ],
+      "expectedTitle": "set-feishu-repair-hosts问题修复",
+      "expectedKind": "bugfix",
+      "expectedStatus": "in_progress"
+    },
+    {
+      "name": "requirement-process-question",
+      "goal": "以后新需求会自动问问题是吗",
+      "activityTitle": "确认需求澄清流程",
+      "assistantMessages": ["说明了需求澄清流程的触发条件。"],
+      "evidence": [
+        { "kind": "request", "summary": "以后新需求会自动问问题是吗" }
+      ],
+      "expectedTitle": "需求技术分析",
+      "expectedKind": "research",
+      "expectedStatus": "investigated"
+    }
+  ]
+}

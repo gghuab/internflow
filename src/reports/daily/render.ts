@@ -2,37 +2,62 @@ import type { ActivityBatch } from '../../core/contracts/index.js';
 import type { WorkItem } from '../../work-items/types.js';
 import type { DailyDraft } from './schema.js';
 import type { DailyReportView } from './types.js';
+import { hasDeliveryRecord, manualValidationFacts } from './view.js';
+
+const DELIVERY_PATTERN = /提交|推送|commit|push|PR\b|MR\b|合入|发布|交付/i;
+const DIALOGUE_NOISE_PATTERN = /^(?:你说得对|你的理解|我先|我会|我正在|我们先|下面先|接下来|最后我|好的|可以的|没问题|让我们|大概率|先给结论|结论[:：]|对[，,。]|有[，,])/;
 
 export function validateDailyDraft(view: DailyReportView, draft: DailyDraft): DailyDraft {
   const items = new Map(view.items.map((item) => [item.id, item]));
+  const presentation = new Map(view.presentationPlan.map((item) => [item.workItemId, item.detailLevel]));
   const todayIds = draft.today.flatMap((entry) => [entry.workItemId, ...entry.relatedWorkItemIds]);
   if (new Set(todayIds).size !== todayIds.length) throw new Error('Daily draft contains duplicate Today work items.');
   const missing = view.items.filter((item) => !todayIds.includes(item.id));
   if (missing.length) throw new Error(`Daily draft omitted reportable work items: ${missing.map((item) => item.id).join(', ')}.`);
+
   for (const entry of draft.today) {
-    const groupedItems = [entry.workItemId, ...entry.relatedWorkItemIds].map((id) => items.get(id));
+    const groupIds = [entry.workItemId, ...entry.relatedWorkItemIds];
+    const groupedItems = groupIds.map((id) => items.get(id));
     if (groupedItems.some((item) => !item)) {
       throw new Error(`Daily draft cites unknown work item in Today group ${entry.workItemId}.`);
     }
-    const allowed = new Set(groupedItems.flatMap((item) => item?.evidenceIds || []));
-    for (const id of entry.evidenceIds) {
-      if (!allowed.has(id)) throw new Error(`Daily draft cites evidence ${id} outside work item group ${entry.workItemId}.`);
+    const missingPlan = groupIds.find((id) => !presentation.has(id));
+    if (missingPlan) throw new Error(`Daily presentation plan omitted work item ${missingPlan}.`);
+    const expectedLevel = groupIds.some((id) => presentation.get(id) === 'full') ? 'full' : 'brief';
+    if (entry.detailLevel !== expectedLevel) {
+      throw new Error(`Daily draft detail level for ${entry.workItemId} must be ${expectedLevel}.`);
     }
-  }
-  for (const entry of [...draft.deepDives, ...draft.takeaways]) {
-    const item = items.get(entry.workItemId);
-    if (!item) throw new Error(`Daily draft cites unknown work item ${entry.workItemId}.`);
-    const todayGroup = draft.today.find((value) => (
-      value.workItemId === item.id || value.relatedWorkItemIds.includes(item.id)
-    ));
-    const groupedItems = todayGroup
-      ? [todayGroup.workItemId, ...todayGroup.relatedWorkItemIds].map((id) => items.get(id))
-      : [item];
-    const allowed = new Set(groupedItems.flatMap((value) => value?.evidenceIds || []));
-    for (const id of entry.evidenceIds) {
-      if (!allowed.has(id)) throw new Error(`Daily draft cites evidence ${id} outside work item group ${item.id}.`);
+    if (entry.detailLevel === 'full' && entry.progress.length < 2) {
+      throw new Error(`Full daily item ${entry.workItemId} requires at least two progress steps.`);
     }
+    if (entry.detailLevel === 'brief' && entry.progress.length > 2) {
+      throw new Error(`Brief daily item ${entry.workItemId} may contain at most two progress steps.`);
+    }
+    validateEvidenceIds(
+      entry.workItemId,
+      entry.evidenceIds,
+      groupedItems.flatMap((item) => item?.evidenceIds || []),
+    );
   }
+
+  const deepDiveCandidates = new Set(view.deepDiveCandidateIds);
+  const takeawayCandidates = new Set(view.takeawayCandidateIds);
+  for (const entry of draft.deepDives) {
+    if (!deepDiveCandidates.has(entry.workItemId)) {
+      throw new Error(`Daily deep dive cites non-candidate work item ${entry.workItemId}.`);
+    }
+    validateCitedEntry(items, draft, entry.workItemId, entry.evidenceIds);
+  }
+  for (const entry of draft.takeaways) {
+    if (!takeawayCandidates.has(entry.workItemId)) {
+      throw new Error(`Daily takeaway cites non-candidate work item ${entry.workItemId}.`);
+    }
+    validateCitedEntry(items, draft, entry.workItemId, entry.evidenceIds);
+  }
+  const deepDiveIds = new Set(draft.deepDives.map((entry) => entry.workItemId));
+  // 候选集合允许重叠，但最终栏目不能重复消费同一工作项；局部去重优于整份日报回退。
+  const takeaways = draft.takeaways.filter((entry) => !deepDiveIds.has(entry.workItemId));
+
   for (const suggestion of draft.suggestions) {
     if (suggestion.workItemId && !items.has(suggestion.workItemId)) {
       throw new Error(`Daily suggestion cites unknown work item ${suggestion.workItemId}.`);
@@ -62,6 +87,7 @@ export function validateDailyDraft(view: DailyReportView, draft: DailyDraft): Da
   if (missingDiagrams.length) throw new Error('Daily draft omitted approved visual plan items.');
   return {
     ...draft,
+    takeaways,
     diagrams: draft.diagrams.map((diagram) => ({
       ...diagram,
       mermaid: sanitizeMermaid(diagram.mermaid) || diagram.mermaid,
@@ -69,20 +95,14 @@ export function validateDailyDraft(view: DailyReportView, draft: DailyDraft): Da
   };
 }
 
-/** 保留原日报五段结构，只丰富每段中的叙事、验证和流程图。 */
+/** 保留五段式结构，事实选择和展示轻重均由本地规则控制。 */
 export function renderDailyReport(batch: ActivityBatch, view: DailyReportView, draft: DailyDraft): string {
-  const qualityNote = view.quality.coverage === 'high'
-    ? ''
-    : view.quality.reasons.length
-      ? ` 注意：${view.quality.reasons.join('，')}，部分细节可能不完整。`
-      : ' 注意：数据覆盖率不完整。';
-  // 飞书标题后空行会渲染成明显空白块；标题与正文之间不插空行。
   return compactSections(`# ${batch.date} 工作日报
 ${renderAudit(batch, view)}
 
 > ${draft.headline}
 
-${draft.overview}${qualityNote}
+${draft.overview}
 
 ${renderGlobalDiagrams(draft)}
 
@@ -90,7 +110,7 @@ ${renderGlobalDiagrams(draft)}
 ${renderToday(view, draft)}
 
 ## 2. 重点任务
-${renderLongest(view, draft)}
+${renderFocusTask(view, draft)}
 
 ## 3. 技术沉淀
 ${renderDeepDives(draft)}
@@ -117,7 +137,7 @@ function renderAudit(batch: ActivityBatch, view: DailyReportView): string {
 function compactSections(markdown: string): string {
   return String(markdown || '')
     .replace(/\r\n/g, '\n')
-    // 标题后空行在飞书会渲染成空白块。
+    // 飞书标题后空行会渲染成明显空白块。
     .replace(/^(#{1,6}\s+[^\n]+)\n+/gm, '$1\n')
     .replace(/^(\*\*[^*\n]+\*\*)\n+/gm, '$1\n')
     .replace(/\n{3,}/g, '\n\n')
@@ -125,39 +145,63 @@ function compactSections(markdown: string): string {
 }
 
 export function fallbackDailyDraft(view: DailyReportView): DailyDraft {
-  const today = view.items.map((item) => ({
-    workItemId: item.id,
-    relatedWorkItemIds: [],
-    title: item.title,
-    background: item.goal || item.title,
-    story: fallbackStory(item),
-    result: primaryResult(item),
-    openQuestions: item.blockers.join('；') || (item.status === 'in_progress' || item.status === 'blocked'
-      ? '仍需继续推进并补齐验证闭环。'
-      : ''),
-    evidenceIds: item.evidenceIds.slice(0, 20),
-  }));
-  const highlights = today.slice(0, 3).map((item) => item.title);
+  const presentation = new Map(view.presentationPlan.map((item) => [item.workItemId, item.detailLevel]));
+  const today = view.items.map((item) => {
+    const detailLevel = presentation.get(item.id) || 'brief';
+    return {
+      workItemId: item.id,
+      relatedWorkItemIds: [],
+      detailLevel,
+      title: item.title,
+      background: isReportNarrative(item.goal)
+        ? item.goal
+        : `围绕“${item.title}”完成事实核对与阶段性推进。`,
+      progress: fallbackProgress(item, detailLevel),
+      keyDecision: item.decisions.find(isReportNarrative) || '',
+      result: primaryResult(item),
+      openQuestions: item.blockers.join('；') || (item.status === 'in_progress' || item.status === 'blocked'
+        ? '仍需继续推进并补齐验证闭环。'
+        : ''),
+      evidenceIds: item.evidenceIds.slice(0, 20),
+    };
+  });
+  const highlights = today.filter((item) => item.detailLevel === 'full').slice(0, 3)
+    .map((item) => item.title);
   const counts = statusCounts(view.items);
+  const deliveredCount = view.items.filter((item) => item.status === 'completed' && hasDeliveryRecord(item)).length;
+  const completedWithoutDelivery = counts.completed - deliveredCount;
   const statusParts = [
-    counts.completed ? `完成 ${counts.completed} 项` : '',
-    counts.investigated ? `完成分析 ${counts.investigated} 项` : '',
+    deliveredCount ? `已交付 ${deliveredCount} 项` : '',
+    completedWithoutDelivery ? `形成可复核产出 ${completedWithoutDelivery} 项` : '',
+    counts.investigated ? `形成分析结论 ${counts.investigated} 项` : '',
     counts.in_progress ? `推进中 ${counts.in_progress} 项` : '',
     counts.blocked ? `阻塞 ${counts.blocked} 项` : '',
   ].filter(Boolean);
+  const openItems = view.items.filter((item) => item.status === 'in_progress' || item.status === 'blocked');
+  const suggestions = openItems.slice(0, 4).map((item, index) => ({
+    workItemId: item.id,
+    priority: index === 0 ? 'P0' as const : 'P1' as const,
+    text: item.status === 'blocked' ? `解除“${item.title}”的阻塞` : `继续推进“${item.title}”`,
+    completionCriteria: item.blockers.length
+      ? `确认并关闭阻塞项：${summarize(item.blockers, 2, 160)}`
+      : '形成可复核产出，并记录验证结果或明确未验证原因。',
+  }));
   return {
-    headline: highlights.length ? `今日主线：${highlights.join('、')}` : '当天没有可汇报工作项',
+    headline: highlights.length ? `今日主线：${highlights.join('、')}` : view.items.length ? '今日以轻量事项确认和结论整理为主' : '当天没有可汇报工作项',
     overview: view.items.length
-      ? `今天共记录 ${view.items.length} 项工作，${statusParts.join('，') || '状态待确认'}。${highlights.length ? `重点包括 ${highlights.join('、')}。` : ''}本草稿由本地事实回退生成，建议正式同步前再人工润色叙事。`
+      ? `今天共记录 ${view.items.length} 项工作，${statusParts.join('，') || '整体状态待确认'}。${highlights.length ? `主要任务包括 ${highlights.join('、')}，其余轻量事项在表格中集中呈现。` : '当天以轻量确认和结论整理为主。'}本草稿由本地事实回退生成。`
       : '当天没有可汇报工作项，可能是会话被过滤、证据不足，或当天确实没有可追溯交付。',
     today,
     deepDives: [],
     takeaways: [],
     diagrams: [],
-    suggestions: [{
+    suggestions: suggestions.length ? suggestions : [{
       workItemId: null,
-      text: view.items.length ? '为进行中的工作补充明确验证闭环。' : '确认当天是否有被过滤的有效会话。',
-      why: view.items.length ? '当前回退草稿只能保证事实覆盖，验证闭环仍需补齐。' : '避免漏记真实工作。',
+      priority: 'P1',
+      text: view.items.length ? '复核已交付事项的验证闭环' : '确认当天是否存在被过滤的有效会话',
+      completionCriteria: view.items.length
+        ? '所有已知风险均已关闭，或已作为后续事项记录完成标准。'
+        : '确认当天没有遗漏可汇报的有效工作项。',
     }],
     agentCandidates: [],
   };
@@ -171,81 +215,123 @@ function renderGlobalDiagrams(draft: DailyDraft): string {
 function renderToday(view: DailyReportView, draft: DailyDraft): string {
   if (!draft.today.length) return '- 无可汇报工作项';
   const items = new Map(view.items.map((item) => [item.id, item]));
-  const sections = draft.today.map((entry) => {
+  const fullSections: string[] = [];
+  const briefRows: string[] = [];
+
+  for (const entry of draft.today) {
     const groupedItems = [entry.workItemId, ...entry.relatedWorkItemIds]
       .map((id) => items.get(id))
       .filter((item): item is WorkItem => Boolean(item));
-    const item = groupedItems[0];
-    if (!item) return '';
-    const files = unique(groupedItems.flatMap((value) => value.changes.flatMap((change) => change.files)));
-    const statuses = groupedItems.map((value) => value.status);
-    const status = statuses.includes('blocked')
-      ? 'blocked'
-      : statuses.includes('in_progress')
-        ? 'in_progress'
-        : statuses.every((value) => value === 'investigated')
-          ? 'investigated'
-          : 'completed';
-    const lines = [
-      `### ${entry.title}`,
-      `- **状态与投入**：${statusLabel(status)}${groupedItems.length > 1 ? `，合并 ${groupedItems.length} 项关联工作` : item.activeMinutes === null ? '' : `，目标日期内累计约 ${item.activeMinutes} 分钟`}`,
-      `- **背景与目标**：${entry.background}`,
-      '- **推进过程**',
-      ...storyBullets(entry.story),
-      `- **结果**：${entry.result}`,
-    ];
-    const inlineItems = groupedItems.filter((value) => view.visualPlan.some((plan) => plan.workItemId === value.id && plan.mode === 'inline'));
-    if (inlineItems.length) lines.push(`- **简要图示**：${inlineItems.map(inlineDiagram).join('；')}`);
-    if (files.length) lines.push(`- **改动范围**：${fileScopeSummary(files)}`);
-    lines.push(`- **验证情况**：${verificationDetail(groupedItems)}`);
-    const blockers = groupedItems.flatMap((value) => value.blockers);
-    if (entry.openQuestions.trim() || blockers.length) {
-      lines.push(`- **未闭环**：${entry.openQuestions.trim() || summarize(blockers, 5, 220)}`);
+    if (!groupedItems.length) continue;
+    if (entry.detailLevel === 'brief') {
+      briefRows.push(`| ${escapeCell(entry.title)} | ${escapeCell(entry.result)} | ${escapeCell(briefStatus(entry, groupedItems))} |`);
+      continue;
     }
-    const groupedIds = new Set(groupedItems.map((value) => value.id));
-    for (const diagram of draft.diagrams.filter((value) => value.workItemId && groupedIds.has(value.workItemId))) {
+
+    const files = unique(groupedItems.flatMap((item) => item.changes.flatMap((change) => change.files)));
+    const lines = [
+      `#### ${entry.title}`,
+      `- **进展与闭环**：${progressLabel(groupedItems)}${groupedItems.length > 1 ? `，合并 ${groupedItems.length} 项关联工作` : ''}；${closureLabel(groupedItems)}`,
+      `- **目标**：${entry.background}`,
+      '- **推进与取舍**',
+      ...entry.progress.map((step) => `  - ${step}`),
+    ];
+    if (entry.keyDecision.trim()) lines.push(`  - 关键取舍：${entry.keyDecision.trim()}`);
+    lines.push('- **可复核产出**', `  - ${entry.result}`);
+    if (files.length) lines.push(`  - 改动范围：${fileScopeSummary(files)}`);
+    lines.push('- **验证与证据**', ...evidenceLines(groupedItems));
+    const risk = riskDetail(entry.openQuestions, groupedItems);
+    lines.push(`- **风险与未闭环**：${risk || '暂无已知未闭环事项'}`);
+
+    const hasInlinePlan = groupedItems.some((item) => view.visualPlan.some((plan) => (
+      plan.workItemId === item.id && plan.mode === 'inline'
+    )));
+    const inline = hasInlinePlan ? inlineDiagram(entry.progress) : '';
+    if (inline) lines.push(`- **简要图示**：${inline}`);
+
+    const groupedIds = new Set(groupedItems.map((item) => item.id));
+    for (const diagram of draft.diagrams.filter((item) => item.workItemId && groupedIds.has(item.workItemId))) {
       lines.push('', renderDiagram(diagram.title, diagram.mermaid));
     }
-    return lines.join('\n');
-  }).filter(Boolean);
-  // 飞书会折叠普通 Markdown 空行；显式空段落让相邻工作项保持一行呼吸空间。
-  return sections.join('\n\n<p><br/></p>\n\n');
+    fullSections.push(lines.join('\n'));
+  }
+
+  const sections: string[] = [];
+  if (fullSections.length) {
+    // 只用标准 Markdown 空行分隔任务，避免预览器把 HTML 空段标签显示成正文。
+    sections.push(`### 主要任务\n${fullSections.join('\n\n')}`);
+  }
+  if (briefRows.length) {
+    sections.push([
+      '### 其他事项',
+      '| 事项 | 结论或产出 | 状态 / 后续 |',
+      '|---|---|---|',
+      ...briefRows,
+    ].join('\n'));
+  }
+  return sections.join('\n\n');
 }
 
-function renderLongest(view: DailyReportView, draft: DailyDraft): string {
-  const item = view.items.find((value) => value.id === view.longestWorkItemId)
-    || view.items.find((value) => view.longestTiedIds.includes(value.id)) || view.items[0];
-  if (!item) return '| 任务 | 为什么耗时 | 产出 | 当前状态 |\n|---|---|---|---|\n| 无可靠最长任务统计 | 当天没有可汇报工作项 | 无 | 待确认 |';
-  const narrative = draft.today.find((value) => (
-    value.workItemId === item.id || value.relatedWorkItemIds.includes(item.id)
+function renderFocusTask(view: DailyReportView, draft: DailyDraft): string {
+  const fullIds = new Set(view.presentationPlan.filter((item) => item.detailLevel === 'full').map((item) => item.workItemId));
+  const focus = view.items.find((item) => item.id === view.longestWorkItemId && fullIds.has(item.id))
+    || view.items.find((item) => view.longestTiedIds.includes(item.id) && fullIds.has(item.id))
+    || view.items.find((item) => fullIds.has(item.id));
+  if (!focus) return '- 当天没有需要单独复盘的重点任务。';
+
+  const narrative = draft.today.find((entry) => (
+    entry.workItemId === focus.id || entry.relatedWorkItemIds.includes(focus.id)
   ));
-  const title = narrative?.title || item.title;
-  const reason = narrative?.background || view.longestReason || '按可靠活跃时长选择';
-  const result = narrative?.result || primaryResult(item);
+  if (!narrative) return '- 当天没有需要单独复盘的重点任务。';
+  const itemMap = new Map(view.items.map((item) => [item.id, item]));
+  const groupedItems = [narrative.workItemId, ...narrative.relatedWorkItemIds]
+    .map((id) => itemMap.get(id))
+    .filter((item): item is WorkItem => Boolean(item));
   return [
-    '| 任务 | 为什么耗时 | 产出 | 当前状态 |',
-    '|---|---|---|---|',
-    `| ${escapeCell(title)} | ${escapeCell(`${reason}${item.activeMinutes === null ? '' : `；累计约 ${item.activeMinutes} 分钟`}`)} | ${escapeCell(result)} | ${statusLabel(item.status)} |`,
+    '| 维度 | 内容 |',
+    '|---|---|',
+    `| 任务 | ${escapeCell(narrative.title)} |`,
+    `| 核心难点 | ${escapeCell(coreDifficulty(narrative.progress, groupedItems))} |`,
+    `| 关键判断与取舍 | ${escapeCell(narrative.keyDecision.trim() || summarize(groupedItems.flatMap((item) => item.decisions), 3, 240) || '未记录需要单独说明的方案取舍')} |`,
+    `| 可复核产出 | ${escapeCell(focusOutput(narrative.result, groupedItems))} |`,
+    `| 验证与证据 | ${escapeCell(evidenceSummary(groupedItems))} |`,
+    `| 剩余风险 | ${escapeCell(riskDetail(narrative.openQuestions, groupedItems) || '暂无已知剩余风险')} |`,
   ].join('\n');
 }
 
 function renderDeepDives(draft: DailyDraft): string {
-  const rows = draft.deepDives.map((item) => `| ${escapeCell(item.knowledge)} | ${escapeCell(item.background)} | ${escapeCell(item.mechanism)} | ${escapeCell(item.defaultAction)} | ${escapeCell(item.verification)} | ${escapeCell(item.antiPattern)} |`);
-  return ['| 知识点 | 现象或背景 | 底层机制或原因 | 默认做法 | 验证方式 | 反模式或易错点 |', '|---|---|---|---|---|---|', ...(rows.length ? rows : ['| 无 | 无 | 无 | 无 | 无 | 无 |'])].join('\n');
+  if (!draft.deepDives.length) return '- 当天没有达到准入标准的技术沉淀。';
+  return draft.deepDives.map((item) => [
+    `### ${item.title}`,
+    `- **结论**：${item.conclusion}`,
+    `- **机制**：${item.mechanism}`,
+    `- **证据**：${item.evidence}`,
+    `- **边界**：${item.boundary}`,
+  ].join('\n')).join('\n\n');
 }
 
 function renderTakeaways(draft: DailyDraft): string {
-  const rows = draft.takeaways.map((item) => `| ${escapeCell(item.method)} | ${escapeCell(item.keyPoint)} | ${escapeCell(item.defaultAction)} | ${escapeCell(item.verification)} | ${escapeCell(item.antiPattern)} |`);
-  return ['| 方法 | 要点 | 默认动作 | 验证 | 反模式 |', '|---|---|---|---|---|', ...(rows.length ? rows : ['| 无 | 无 | 无 | 无 | 无 |'])].join('\n');
+  const rows = draft.takeaways.map((item) => `| ${escapeCell(item.method)} | ${escapeCell(item.applicability)} | ${escapeCell(item.defaultAction)} | ${escapeCell(item.completionCriteria)} | ${escapeCell(item.avoid)} |`);
+  return [
+    '| 方法 | 适用场景 | 默认动作 | 完成标准 | 避免 |',
+    '|---|---|---|---|---|',
+    ...(rows.length ? rows : ['| 无 | 无 | 无 | 无 | 无 |']),
+  ].join('\n');
 }
 
 function renderSuggestions(draft: DailyDraft): string {
-  return draft.suggestions.map((item) => `- ${escapeInline(item.text)}${item.why.trim() ? `（${item.why.trim()}）` : ''}`).join('\n') || '- 暂无明确下一步';
+  const order = { P0: 0, P1: 1, P2: 2 };
+  return [...draft.suggestions]
+    .sort((left, right) => order[left.priority] - order[right.priority])
+    .map((item, index) => [
+      `${index + 1}. **${item.priority}｜${escapeInline(item.text)}**`,
+      `   - 完成标准：${escapeInline(item.completionCriteria)}`,
+    ].join('\n'))
+    .join('\n\n') || '- 暂无明确下一步';
 }
 
 function renderDiagram(title: string, mermaid: string): string {
   const body = sanitizeMermaid(mermaid);
-  // 小标题后不插空行，避免飞书多出空白块。
   return body ? [`**${escapeInline(title)}**`, '```mermaid', body, '```'].join('\n') : '';
 }
 
@@ -265,24 +351,17 @@ function diagramMatchesMode(mermaid: string, mode: 'flowchart' | 'sequence' | 's
   return /^(?:flowchart|graph)\b/i.test(first);
 }
 
-function inlineDiagram(item: WorkItem): string {
-  const narrativeSteps = unique([...item.actions, ...item.outcomes])
-    .map((value) => value.replace(/[。；;]+$/g, '').trim())
-    .filter(isInlineVisualStep);
-  const anchor = [item.goal, item.title].find(isInlineVisualStep) || '明确任务目标';
-  const steps = unique([
-    ...narrativeSteps,
-    anchor,
-    deliveryStep(item),
-    closureStep(item),
-  ]).map((value) => compactInline(value, 28)).slice(0, 3);
-  return steps.join(' → ');
+function inlineDiagram(progress: string[]): string {
+  const steps = unique(progress.map((value) => value.replace(/[。；;]+$/g, '').trim()))
+    .filter(isInlineVisualStep)
+    .map((value) => compactInline(value, 28));
+  return steps.length >= 3 ? steps.slice(0, 3).join(' → ') : '';
 }
 
-/** 行内图只保留业务动作；原始路径和命令属于证据，不应成为读图节点。 */
+/** 行内图只接受整理后的业务步骤，拒绝命令、路径和对话式开场。 */
 function isInlineVisualStep(value: string): boolean {
   const text = String(value || '').trim();
-  if (!isReadableNarrative(text)) return false;
+  if (!isReportNarrative(text) || /\[[^\]]+\]\([^)]+\)/.test(text) || /[?？]$/.test(text)) return false;
   if (/(?:^|[：:；;]\s*)(?:git|npm|npx|pnpm|yarn|emo|node|bash|sh|set|cd|cat|rg|find|jq|curl)\b/i.test(text)) {
     return false;
   }
@@ -290,67 +369,147 @@ function isInlineVisualStep(value: string): boolean {
   return !/(?:^|\s)[^\s；;]+\.(?:ts|tsx|js|jsx|json|go|py|rs|java|kt|swift|yaml|yml|toml|md)\b/i.test(text);
 }
 
-function deliveryStep(item: WorkItem): string {
-  if (item.kind === 'research') return '完成分析判断';
-  if (item.kind === 'bugfix') return '完成问题修复';
-  if (item.kind === 'tooling') return '完成工具调整';
-  if (item.kind === 'docs') return '完成文档整理';
-  return item.changes.length ? '完成实现调整' : '形成处理方案';
+function fallbackProgress(item: WorkItem, detailLevel: 'full' | 'brief'): string[] {
+  const candidates = unique([
+    ...item.actions,
+    ...item.outcomes,
+    item.goal,
+  ].map((value) => compactInline(value, 220)).filter(isInlineVisualStep));
+  if (detailLevel === 'brief') return candidates.slice(0, 2).length ? candidates.slice(0, 2) : [item.title];
+  const progress = candidates.slice(0, 5);
+  if (progress.length < 2) progress.push(closureStep(item));
+  return unique(progress).slice(0, 5);
 }
 
 function closureStep(item: WorkItem): string {
-  if (item.verifications.some((value) => value.outcome === 'failed')) return '发现验证问题';
-  if (item.verifications.some((value) => value.outcome === 'passed')) return '验证通过';
-  if (item.status === 'blocked') return '等待阻塞解除';
-  if (item.status === 'in_progress') return '继续推进闭环';
-  if (item.status === 'investigated') return '形成分析结论';
-  return '形成交付结果';
-}
-
-function storyBullets(story: string): string[] {
-  const parts = String(story || '').split(/\n+|(?<=[。！？；])/).map((part) => part.trim()).filter(Boolean);
-  if (!parts.length) return ['  - 暂无详细推进过程'];
-  return parts.map((part) => `  - ${part}`);
-}
-
-function fallbackStory(item: WorkItem): string {
-  return [
-    item.goal ? `围绕“${item.goal}”推进。` : '',
-    ...item.actions.slice(0, 3).map((action) => `${action}。`),
-    ...item.outcomes.slice(0, 2).map((outcome) => `结果：${outcome}。`),
-    item.blockers[0] ? `当前仍有阻塞：${item.blockers[0]}。` : '',
-  ].filter(Boolean).join('') || `${item.title} 已记录，但缺少更细的推进描述。`;
+  if (item.verifications.some((value) => value.outcome === 'failed')) return '验证发现问题，仍需归因';
+  if (item.verifications.some((value) => value.outcome === 'passed')) return '完成验证并记录通过结果';
+  if (item.status === 'blocked') return '等待阻塞解除后继续推进';
+  if (item.status === 'in_progress') return '保留为后续待闭环事项';
+  if (item.status === 'investigated') return '形成可复核的分析结论';
+  return '形成可复核的交付结果';
 }
 
 function primaryResult(item: WorkItem): string {
-  return compactInline(item.outcomes.find(isReadableNarrative) || item.goal || item.title || '暂无明确结果', 220);
+  return compactInline(
+    item.outcomes.find(isReportNarrative)
+      || item.decisions.find(isReportNarrative)
+      || closureStep(item),
+    220,
+  );
 }
 
-function isReadableNarrative(value: string): boolean {
-  const text = String(value || '').trim();
-  return text.length >= 4 && !/^(?:git|npm|npx|pnpm|yarn|emo|node|bash|sh|set|cd|cat|rg|find|jq|curl)\b/i.test(text);
+function progressLabel(items: WorkItem[]): string {
+  const statuses = items.map((item) => item.status);
+  if (statuses.includes('blocked')) return '当前阻塞';
+  if (statuses.includes('in_progress')) return '正在推进';
+  if (statuses.every((status) => status === 'investigated')) return '已形成分析结论';
+  if (statuses.every((status) => status === 'completed')) {
+    return items.some(hasDeliveryRecord) ? '已交付' : '已形成可复核产出';
+  }
+  return '已形成阶段性产出';
 }
 
-function verificationDetail(items: WorkItem[]): string {
+function closureLabel(items: WorkItem[]): string {
   const verifications = items.flatMap((item) => item.verifications);
-  if (!verifications.length) return '未记录独立验证命令';
+  if (verifications.some((item) => item.outcome === 'failed')) return '验证失败，待确认是本次改动还是存量问题';
+  if (verifications.some((item) => item.outcome === 'unknown')) return '验证结果未确认';
+  if (verifications.some((item) => item.outcome === 'passed')) return '已记录通过验证';
+  if (manualEvidence(items).length) return '已记录运行态或人工验证';
+  if (deliveryEvidence(items).length) return '已有交付证据，缺少自动化验证记录';
+  if (items.every((item) => item.kind === 'research')) return '分析结论已形成，未记录独立验证';
+  return '尚未记录验证闭环';
+}
+
+function evidenceLines(items: WorkItem[]): string[] {
+  const lines: string[] = [];
+  const verifications = items.flatMap((item) => item.verifications);
+  if (verifications.length) lines.push(`  - 自动化检查：${automationDetail(verifications)}`);
+  const manual = manualEvidence(items);
+  if (manual.length) lines.push(`  - 运行态 / 人工验证：${summarize(manual, 4, 240)}`);
+  const delivery = deliveryEvidence(items);
+  if (delivery.length) lines.push(`  - 交付证据：${delivery.join('；')}`);
+  if (!lines.length) lines.push('  - 未记录可复核的验证或交付证据');
+  return lines;
+}
+
+function evidenceSummary(items: WorkItem[]): string {
+  return evidenceLines(items).map((line) => line.replace(/^\s*-\s*/, '')).join('；');
+}
+
+function automationDetail(verifications: WorkItem['verifications']): string {
   const checks = unique(verifications.map((verification) => verificationType(verification.command)));
   const counts = { passed: 0, failed: 0, unknown: 0 };
   for (const verification of verifications) counts[verification.outcome] += 1;
-
   const parts = [
     counts.passed ? `${counts.passed} 项通过` : '',
     counts.failed ? `${counts.failed} 项失败` : '',
     counts.unknown ? `${counts.unknown} 项未确认` : '',
   ].filter(Boolean);
+  return `执行了${checks.join('、')}，${parts.join('、')}`;
+}
 
-  const conclusion = counts.failed > 0
-    ? '，需要确认失败是本次改动引入还是存量问题'
-    : counts.unknown > 0
-      ? '，部分检查没有记录到最终结果'
-      : '，验证已通过';
+function manualEvidence(items: WorkItem[]): string[] {
+  return unique(items.flatMap(manualValidationFacts)
+    .filter(isReadableNarrative)
+    .map((value) => compactInline(value, 240)));
+}
 
-  return `执行了${checks.join('、')}，${parts.join('、')}${conclusion}`;
+function deliveryEvidence(items: WorkItem[]): string[] {
+  const deliveredItems = items.filter(hasDeliveryRecord);
+  const commits = unique(deliveredItems.flatMap((item) => item.commits || []))
+    .map((commit) => `Commit ${commit.slice(0, 10)}`);
+  const branches = unique(deliveredItems.map((item) => item.branch || '')).map((branch) => `工作分支 ${branch}`);
+  const outcomes = unique(deliveredItems.flatMap((item) => item.outcomes)
+    .filter((value) => DELIVERY_PATTERN.test(value))
+    .map(deliveryOutcomeLabel));
+  return [...commits, ...branches, ...outcomes].slice(0, 5);
+}
+
+function deliveryOutcomeLabel(value: string): string {
+  if (/^git\s+commit\b/i.test(value)) return '已记录 Git 提交操作';
+  if (/^git\s+push\b/i.test(value)) return '已记录 Git 推送操作';
+  if (/^(?:gh\s+pr|glab\s+mr)\s+create\b/i.test(value)) return '已记录 PR / MR 创建操作';
+  return compactInline(value, 180);
+}
+
+function riskDetail(openQuestions: string, items: WorkItem[]): string {
+  const verificationRisks = items.flatMap((item) => item.verifications)
+    .filter((item) => item.outcome !== 'passed')
+    .map((item) => item.outcome === 'failed'
+      ? `${verificationType(item.command)}失败，待归因`
+      : `${verificationType(item.command)}结果未确认`);
+  return summarize([
+    openQuestions.trim(),
+    ...items.flatMap((item) => item.blockers),
+    ...verificationRisks,
+  ], 5, 260);
+}
+
+function briefStatus(entry: DailyDraft['today'][number], items: WorkItem[]): string {
+  const risk = riskDetail(entry.openQuestions, items);
+  return `${progressLabel(items)}；${risk || closureLabel(items)}`;
+}
+
+function coreDifficulty(progress: string[], items: WorkItem[]): string {
+  const blockers = unique(items.flatMap((item) => item.blockers));
+  if (blockers.length) return summarize(blockers, 2, 240);
+  const decisions = unique(items.flatMap((item) => item.decisions));
+  if (decisions.length > 1) return `需要协调 ${decisions.length} 个相互关联的关键判断`;
+  const files = unique(items.flatMap((item) => item.changes.flatMap((change) => change.files)));
+  if (files.length > 1) return `涉及 ${files.length} 个文件或模块，需要保持实现和验证口径一致`;
+  if (progress.length >= 4) return `包含 ${progress.length} 个连续推进步骤，需要保持事实、取舍和验证链一致`;
+  return progress[0] || '未记录需要单独说明的复杂点';
+}
+
+function focusOutput(result: string, items: WorkItem[]): string {
+  const files = unique(items.flatMap((item) => item.changes.flatMap((change) => change.files)));
+  const delivery = deliveryEvidence(items);
+  const parts = [
+    files.length ? `改动范围：${fileScopeSummary(files)}` : '',
+    delivery.length ? delivery.join('；') : '',
+  ].filter(Boolean);
+  return parts.join('；') || result;
 }
 
 function verificationType(command: string): string {
@@ -393,6 +552,34 @@ function fileScopeSummary(files: string[]): string {
   }).join('；');
 }
 
+function validateCitedEntry(
+  items: Map<string, WorkItem>,
+  draft: DailyDraft,
+  workItemId: string,
+  evidenceIds: string[],
+): void {
+  const item = items.get(workItemId);
+  if (!item) throw new Error(`Daily draft cites unknown work item ${workItemId}.`);
+  const todayGroup = draft.today.find((entry) => (
+    entry.workItemId === item.id || entry.relatedWorkItemIds.includes(item.id)
+  ));
+  const groupedItems = todayGroup
+    ? [todayGroup.workItemId, ...todayGroup.relatedWorkItemIds].map((id) => items.get(id))
+    : [item];
+  validateEvidenceIds(
+    workItemId,
+    evidenceIds,
+    groupedItems.flatMap((value) => value?.evidenceIds || []),
+  );
+}
+
+function validateEvidenceIds(subjectId: string, evidenceIds: string[], allowedIds: string[]): void {
+  const allowed = new Set(allowedIds);
+  for (const id of evidenceIds) {
+    if (!allowed.has(id)) throw new Error(`Daily draft cites evidence ${id} outside work item group ${subjectId}.`);
+  }
+}
+
 function statusCounts(items: WorkItem[]) {
   const counts = { completed: 0, in_progress: 0, blocked: 0, investigated: 0 };
   for (const item of items) counts[item.status] += 1;
@@ -410,12 +597,24 @@ function compactInline(value: string, maxLength: number): string {
   return compact.length <= maxLength ? compact : `${compact.slice(0, maxLength - 1)}…`;
 }
 
-function unique(values: string[]): string[] { return [...new Set(values.filter(Boolean))]; }
-
-function statusLabel(status: WorkItem['status']): string {
-  return ({ completed: '已完成', in_progress: '进行中', blocked: '阻塞', investigated: '已分析' } as const)[status];
+function isReadableNarrative(value: string): boolean {
+  const text = String(value || '').trim();
+  return text.length >= 4 && !/^(?:git|npm|npx|pnpm|yarn|emo|node|bash|sh|set|cd|cat|rg|find|jq|curl)\b/i.test(text);
 }
 
-function escapeInline(value: string): string { return String(value || '').replace(/\r?\n/g, ' ').trim(); }
+function isReportNarrative(value: string): boolean {
+  const text = String(value || '').trim();
+  return isReadableNarrative(text) && !DIALOGUE_NOISE_PATTERN.test(text);
+}
 
-function escapeCell(value: string): string { return escapeInline(value).replace(/\|/g, '\\|'); }
+function unique(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function escapeInline(value: string): string {
+  return String(value || '').replace(/\r?\n/g, ' ').trim();
+}
+
+function escapeCell(value: string): string {
+  return escapeInline(value).replace(/\|/g, '\\|');
+}

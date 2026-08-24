@@ -1,0 +1,8 @@
+{
+  "activities": [{ "id": "dev", "rootSessionId": "dev", "cwd": "/workspace/app", "gitBranch": "feat/api", "firstUserMessage": "新增用户接口字段", "changedFiles": ["src/api.ts"] }],
+  "evidence": [
+    { "id": "dev-request", "kind": "request", "status": "confirmed", "sourceEventIds": ["event-dev-request"] },
+    { "id": "dev-change", "kind": "change", "status": "confirmed", "sourceEventIds": ["event-dev-change"] }
+  ],
+  "expected": { "sourceEventCount": 2, "workItemCount": 1, "dailyIncluded": true, "devLogIncluded": true }
+}

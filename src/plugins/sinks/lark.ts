@@ -35,9 +35,17 @@ export class LarkSink implements SinkPlugin {
     // 日报覆盖与普通追加不依赖远端正文；仅需求记录生成前需要结构快照。
     if (lark.mode !== 'section-append') return {};
     const executable = await requireLarkCli(lark);
-    const markdown = lark.reader === 'larkparser'
-      ? await fetchDocumentWithLarkParser(lark)
-      : (await fetchDocument(executable, lark, 'full', 'markdown')).content;
+    let markdown: string;
+    if (lark.reader === 'larkparser') {
+      try {
+        markdown = await fetchDocumentWithLarkParser(lark);
+      } catch {
+        // larkparser 偶发网络失败时，回退到写入端 CLI 读取，避免整次任务在生成前中断。
+        markdown = (await fetchDocument(executable, lark, 'full', 'markdown')).content;
+      }
+    } else {
+      markdown = (await fetchDocument(executable, lark, 'full', 'markdown')).content;
+    }
     const outline = await fetchDocument(executable, lark, 'outline', 'xml');
     return {
       markdown,
@@ -254,7 +262,12 @@ export function splitHistoryMarkdown(markdown: string): string[] {
 
 /** Mermaid 围栏在飞书 Markdown 中只是代码块，发布前转换成可直接渲染的画板。 */
 export function prepareLarkMarkdown(markdown: string): string {
-  return compactLarkBlockSpacing(markdown).replace(
+  // 历史归档里可能残留旧版 HTML 空段；发布边界统一清除，避免再次写回飞书。
+  const normalized = markdown.replace(
+    /^[\t ]*<p>\s*<br\s*\/?>\s*<\/p>[\t ]*$/gim,
+    '',
+  );
+  return compactLarkBlockSpacing(normalized).replace(
     /^```mermaid[\t ]*\r?\n([\s\S]*?)^```[\t ]*$/gim,
     (_match, source: string) => `<whiteboard type="mermaid">\n${escapeXmlText(source.trim())}\n</whiteboard>`,
   );

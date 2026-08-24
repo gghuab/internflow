@@ -33,7 +33,8 @@ export function classifyWorkItem(
 
   // 没有实际改动的疑问和解释请求属于研究，不因日志中偶然出现 push/失败而误分类。
   if (!hasChange && !hasDelivery && (RESEARCH.test(primary) || isQuestion(primary))) return 'research';
-  if (OPERATIONS.test(primary) && !FEATURE_ACTION.test(primary)) return 'operations';
+  // 有真实代码改动时，末尾的推送、提交或删分支只是交付动作，不能覆盖开发类型。
+  if (!hasChange && OPERATIONS.test(primary) && !FEATURE_ACTION.test(primary)) return 'operations';
   if (hasChange && REFACTOR.test(primary)) return 'refactor';
   if (hasChange && BUG_ACTION.test(primary)) return 'bugfix';
   if (hasChange && TOOLING.test(primary)) return 'tooling';
@@ -48,7 +49,6 @@ export function classifyWorkItem(
   if (hasChange && BUG_ACTION.test(requested)) return 'bugfix';
   if (hasChange && TOOLING.test(requested) && !FEATURE.test(requested)) return 'tooling';
   if (hasChange && DOCS.test(requested) && !FEATURE.test(requested)) return 'docs';
-  if (hasDelivery && OPERATIONS.test(`${primary}\n${requested}\n${changeText}`)) return 'operations';
   if (!hasChange && OPERATIONS.test(`${primary}\n${requested}`)) return 'operations';
   if (!hasChange && RESEARCH.test(contextText)) return 'research';
   return hasChange ? 'feature' : hasDelivery ? 'operations' : 'research';

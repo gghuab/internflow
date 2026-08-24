@@ -1,4 +1,5 @@
 import type { ActivityBatch } from '../../core/contracts/index.js';
+import { hasDeliveryRecord } from './view.js';
 
 export function workItemDailyInput(batch: ActivityBatch) {
   if (!batch.dailyView) return null;
@@ -8,10 +9,16 @@ export function workItemDailyInput(batch: ActivityBatch) {
     quality: batch.dailyView.quality,
     longestWorkItemId: batch.dailyView.longestWorkItemId,
     longestTiedIds: batch.dailyView.longestTiedIds,
+    deepDiveCandidateIds: batch.dailyView.deepDiveCandidateIds,
+    takeawayCandidateIds: batch.dailyView.takeawayCandidateIds,
+    presentationPlan: batch.dailyView.presentationPlan,
     visualPlan: batch.dailyView.visualPlan,
     items: batch.dailyView.items.map((item) => ({
       id: item.id,
       subjectKey: item.subjectKey,
+      repositoryKey: item.repositoryKey,
+      branch: item.branch,
+      commits: hasDeliveryRecord(item) ? item.commits : undefined,
       kind: item.kind,
       status: item.status,
       title: item.title,
