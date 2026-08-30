@@ -11,8 +11,9 @@ export function projectDevLogCandidates(
   config: SourceConfig = { type: 'codex' },
   assessments: DecisionAssessment[] = [],
 ): DevLogCandidate[] {
-  return workItems.flatMap((item) => {
-    const files = [...new Set(item.changes.flatMap((change) => change.files))];
+  const projected = workItems.flatMap((item) => {
+    const files = [...new Set(item.changes.flatMap((change) => change.files))]
+      .filter((file) => !/(?:^|\/)(?:node_modules|\.git|dist|coverage)(?:\/|$)|\.tsbuildinfo$|\.(?:log|jsonl)$/i.test(file));
     // Daily 与 DevLog 必须共享同一个确定性 WorkItem 标题，禁止下游再次推断。
     const candidateTitle = item.title;
     const text = [
@@ -60,6 +61,103 @@ export function projectDevLogCandidates(
       contentFingerprint,
     }];
   });
+  return mergeRequirementCandidates(projected);
+}
+
+function mergeRequirementCandidates(candidates: DevLogCandidate[]): DevLogCandidate[] {
+  const branchScopes = new Map<string, Set<string>>();
+  for (const candidate of candidates) {
+    if (candidate.section !== 'requirement' || !candidate.branch) continue;
+    const branchKey = `${candidate.repositoryKey || ''}|${candidate.branch}`;
+    const scopes = branchScopes.get(branchKey) || new Set<string>();
+    for (const scope of businessScopes(candidate.files)) scopes.add(scope);
+    branchScopes.set(branchKey, scopes);
+  }
+
+  const groups = new Map<string, DevLogCandidate[]>();
+  for (const candidate of candidates) {
+    if (candidate.section !== 'requirement' || !candidate.branch) {
+      groups.set(`candidate:${candidate.id}`, [candidate]);
+      continue;
+    }
+    const branchKey = `${candidate.repositoryKey || ''}|${candidate.branch}`;
+    const scopes = businessScopes(candidate.files);
+    const knownScopes = branchScopes.get(branchKey) || new Set<string>();
+    // 配置、IDL 等辅助文件在该分支只有一个业务域时，归入同一需求；多个业务域时保持独立。
+    const scope = scopes[0] || (knownScopes.size === 1 ? [...knownScopes][0] : `aux:${candidate.subjectKey}`);
+    const key = `${branchKey}|${scope}`;
+    const values = groups.get(key) || [];
+    values.push(candidate);
+    groups.set(key, values);
+  }
+  return [...groups.values()].map(mergeCandidateGroup);
+}
+
+function mergeCandidateGroup(values: DevLogCandidate[]): DevLogCandidate {
+  if (values.length === 1) return values[0]!;
+  const facts = unique(values.flatMap((item) => item.facts));
+  const files = unique(values.flatMap((item) => item.files));
+  const evidenceIds = unique(values.flatMap((item) => item.evidenceIds)).sort();
+  const subjectKey = stableHash(`devlog-requirement|${values[0]?.repositoryKey || ''}|${values[0]?.branch || ''}|${businessScopes(files).join('|')}`);
+  const status = values.some((item) => item.status === 'blocked')
+    ? 'blocked'
+    : values.some((item) => item.status === 'in_progress') ? 'in_progress' : 'completed';
+  const title = [...values].sort((left, right) => candidateTitleScore(right.title) - candidateTitleScore(left.title)
+    || left.title.length - right.title.length)[0]?.title || values[0]!.title;
+  const contentFingerprint = stableHash(JSON.stringify({ subjectKey, section: 'requirement', status, evidenceIds, facts }));
+  const startedAt = values.map((item) => item.startedAt || '').filter(Boolean).sort()[0];
+  return {
+    ...values[0]!,
+    id: stableHash(`${subjectKey}|requirement|${contentFingerprint}`),
+    subjectKey,
+    title,
+    status,
+    facts,
+    files,
+    excerpts: values.flatMap((item) => item.excerpts).slice(0, 6),
+    verificationSummary: unique(values.map((item) => item.verificationSummary)).join('；'),
+    evidenceIds,
+    contentFingerprint,
+    ...(values.flatMap((item) => item.commits || []).length
+      ? { commits: unique(values.flatMap((item) => item.commits || [])) }
+      : {}),
+    ...(startedAt ? { startedAt } : {}),
+  };
+}
+
+function businessScopes(files: string[]): string[] {
+  return unique(files.flatMap((file) => {
+    const parts = file.replace(/\\/g, '/').split('/').filter(Boolean);
+    for (const marker of ['features', 'pages', 'domain']) {
+      const index = parts.indexOf(marker);
+      if (index >= 0 && parts[index + 1]) return [parts.slice(index, index + 2).join('/')];
+    }
+    const subPackage = parts.indexOf('sub-packages');
+    return subPackage >= 0 && parts[subPackage + 2]
+      ? [parts.slice(subPackage, subPackage + 3).join('/')]
+      : [];
+  })).sort((left, right) => scopePriority(left) - scopePriority(right) || left.localeCompare(right));
+}
+
+function scopePriority(value: string): number {
+  if (value.startsWith('sub-packages/')) return 0;
+  if (value.startsWith('pages/')) return 1;
+  if (value.startsWith('features/')) return 2;
+  return 3;
+}
+
+function candidateTitleScore(title: string): number {
+  let score = Math.min(title.length, 32);
+  if (title.length >= 6 && title.length <= 28) score += 8;
+  if (/(贴纸|海报|模板|上传|预览|下载|核销|报名|活动|页面|接口|组件)/.test(title)) score += 8;
+  if (/^(?:这个|那个|这里|你的|给我|再|现在)|(?:怎么实现|能实现|分析|看看)$/.test(title)) score -= 12;
+  if (/(?:status_code|status_msg|\bconst\b|container|service|serivice|commit|push|git|diff|incut_)/i.test(title)) score -= 16;
+  if (/^[A-Za-z0-9_.-]+(?:功能开发|代码重构)$/.test(title)) score -= 10;
+  return score;
+}
+
+function unique(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))];
 }
 
 function sectionFor(item: WorkItem, text: string): {
@@ -98,6 +196,8 @@ function sectionFor(item: WorkItem, text: string): {
   }
   if ((item.kind === 'feature' || item.kind === 'refactor')
     && hasChange
+    // 需求开发记录只接收稳定产品代码；插件、个人工作流等工具改动留在日报。
+    && stableProductModule
     // 持续需求分支或已有提交可以证明重构归属；零散重构仍要求当天验证通过。
     && (item.kind !== 'refactor' || hasPassedVerification || deliveryReference)
     && score >= 6) {

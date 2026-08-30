@@ -129,6 +129,8 @@ export interface DevLogCandidate {
 
 export interface ResolvedDevLogCandidate extends DevLogCandidate {
   subjectHeading: string;
+  /** Bug 与既有需求有关时只记录关联，不改变其 ISSUE 分类。 */
+  relatedRequirementHeading?: string;
   allowedTargetRefs: string[];
   writeTargets: DevLogWriteTarget[];
   routingAssessmentId: string;

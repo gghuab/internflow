@@ -30,10 +30,18 @@ interface SyncedSubject {
 }
 
 interface LedgerData {
-  version: 2;
+  version: 3;
+  semanticVersion: '2.0.0';
   evidence: Record<string, SyncedEvidence>;
   subjects: Record<string, SyncedSubject>;
 }
+
+const EMPTY_LEDGER = (): LedgerData => ({
+  version: 3,
+  semanticVersion: '2.0.0',
+  evidence: {},
+  subjects: {},
+});
 
 export class DevLogEvidenceLedger {
   constructor(readonly path: string) {}
@@ -52,7 +60,8 @@ export class DevLogEvidenceLedger {
       const subject = data.subjects[candidate.subjectKey];
       const sameContent = Boolean(subject?.contentFingerprints.includes(candidate.contentFingerprint));
       const evidenceSynced = candidate.evidenceIds.every((id) => Boolean(data.evidence[id]));
-      const pending = !sameContent && !evidenceSynced;
+      // 同一证据在语义策略升级后可能得到新的标题或分类；内容指纹变化时必须允许重放。
+      const pending = !sameContent;
       const evidence = [{ kind: 'dev-log-candidate' as const, id: candidate.id }];
       assessments.push(withDecisionId({
         kind: 'assessment' as const,
@@ -146,20 +155,23 @@ export class DevLogEvidenceLedger {
 
   private async read(): Promise<LedgerData> {
     try {
-      const value = JSON.parse(await readFile(this.path, 'utf8')) as LedgerData | {
-        version: 1;
-        evidence: Record<string, SyncedEvidence>;
+      const value = JSON.parse(await readFile(this.path, 'utf8')) as {
+        version?: number;
+        semanticVersion?: string;
+        evidence?: Record<string, SyncedEvidence>;
+        subjects?: Record<string, SyncedSubject>;
       };
-      if (value?.version === 2 && value.evidence && value.subjects) return value;
-      if (value?.version === 1 && value.evidence && typeof value.evidence === 'object') {
-        return { version: 2, evidence: value.evidence, subjects: {} };
+      if (value?.version === 3 && value.semanticVersion === '2.0.0' && value.evidence && value.subjects) {
+        return value as LedgerData;
       }
+      // v1/v2 使用“分支即需求”和“Bug 可改写为需求”的旧语义，不能继承其绑定与去重结果。
+      if (value?.version === 1 || value?.version === 2 || value?.version === 3) return EMPTY_LEDGER();
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
         throw new Error(`Cannot read dev-log evidence ledger ${this.path}: ${String(error)}`);
       }
     }
-    return { version: 2, evidence: {}, subjects: {} };
+    return EMPTY_LEDGER();
   }
 
   private async write(data: LedgerData): Promise<void> {

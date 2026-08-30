@@ -35,7 +35,7 @@
         { "kind": "change", "summary": "修改运行配置", "files": ["src/core/config.ts", "src/core/runner.ts"] },
         { "kind": "verification", "summary": "npm test 通过", "verification": { "command": "npm test", "exitCode": 0, "outcome": "passed" } }
       ],
-      "expectedTitle": "core 与 runner功能开发",
+      "expectedTitle": "运行配置能力升级",
       "expectedKind": "feature",
       "expectedStatus": "completed"
     }

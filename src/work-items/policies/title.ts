@@ -1,7 +1,7 @@
 import type { WorkItemKind } from '../types.js';
 
 const MAX_TITLE_LENGTH = 32;
-const LEADING_CHATTER = /^(?:(?:请|麻烦|赶快|帮忙|帮我|你来帮我|你帮我|我想|我要|我需要|需要|继续|看一下|看看|好的|好|那|那么|现在|我现在想问(?:你)?|我想问(?:你)?)[，,、：:\s]*)+/i;
+const LEADING_CHATTER = /^(?:(?:请|麻烦|赶快|帮忙|帮我|你来帮我|你帮我|我想|我要|我需要|需要|继续|看一下|看看|好的|好|那|那么|现在|要求的是|我现在想问(?:你)?|我想问(?:你)?)[，,、：:\s]*)+/i;
 const TRAILING_CHATTER = /(?:怎么做|怎么弄|告诉我怎么打开|为什么|为啥|是什么|是啥|可以吗|行吗|好吗|吗|呢|吧|呀)+$/i;
 const VAGUE_REFERENCE = /^(?:已完成|完成|技术分析|直接开始(?:修复|处理)?|开始处理|恢复一下|解析一下(?:这个)?|看一下(?:这个)?|bug|问题|这个|那个|这里|上面|下面|第[一二三四五六七八九十\d]+个|(?:和|与)?(?:增强|优化|调整))(?:[:：。.!！啊呀吧\s]*)$/i;
 const LOW_INFORMATION = /^(?:这里|这个|那个|上面|下面|第[一二三四五六七八九十\d]+个|赶快|我刚才|好的，?按|按(?:你的|这个|上面)|直接开始)/;
@@ -17,18 +17,54 @@ export function inferWorkItemTitle(
   files: string[],
   kind: WorkItemKind,
   contextTexts: string[] = [],
-  branch = '',
+  _branch = '',
 ): string {
   const cleanedGoal = cleanSentence(goal);
   const goalTitle = actionableTitle(cleanedGoal, kind, QUESTION.test(goal));
   const outcomeTitle = bestOutcomeTitle(outcomes, kind);
+  const businessTitle = businessScopeTitle(files, kind);
   const scopedTitle = fileTitle(files, kind);
   const topicTitle = topicTitleFromText(cleanedGoal, kind);
   const contextTitle = contextScopeTitle(contextTexts, kind);
-  const stableBranchTitle = branchTitle(branch, kind);
-
-  const title = contextTitle || stableBranchTitle || goalTitle || scopedTitle || outcomeTitle || topicTitle || fallbackLabel(kind);
+  // 人类可读标题必须来自业务目标或代码范围；分支名只进入交付证据，不再冒充需求名称。
+  const title = [contextTitle, goalTitle, outcomeTitle, businessTitle, scopedTitle, topicTitle]
+    .filter(Boolean)
+    .sort((left, right) => titleQualityScore(right) - titleQualityScore(left) || left.length - right.length)[0]
+    || fallbackLabel(kind);
   return limitTitle(title);
+}
+
+function businessScopeTitle(files: string[], kind: WorkItemKind): string {
+  const paths = files.join('\n');
+  const bug = kind === 'bugfix';
+  if (/ActivityManagePopup/i.test(paths)) return bug ? '活动管理弹窗文案回退' : '活动管理弹窗交互优化';
+  if (/apply-management/i.test(paths)) return bug ? '报名申请列表问题修复' : '报名申请列表状态展示优化';
+  if (/registration-v2/i.test(paths)) return bug ? '报名详情组件问题修复' : '报名详情组件分层重构';
+  if (/group-association-modal|bind-managed-groups/i.test(paths)) return bug ? '活动绑定群列表问题修复' : '活动绑定群列表与弹窗优化';
+  if (/RefundPolicyNotice/i.test(paths)) return bug ? '报名详情退款提示问题修复' : '报名详情退款提示优化';
+  if (/activity-tracking|page-tracking/i.test(paths)) return bug ? '活动创建页埋点问题修复' : '活动创建页埋点服务重构';
+  if (/launch-activity-v2-migration/i.test(paths)) return bug ? '活动创建页 V2 回归修复' : '活动创建页 V2 重构';
+  if (/activity-detail/i.test(paths)) return bug ? '活动详情页问题修复' : '活动详情页初始化重构';
+  if (/(?:checkin|check-in).*(?:poster|template|swiper|image)|(?:poster|template|swiper|image).*(?:checkin|check-in)/i.test(paths)) {
+    return bug ? '打卡图片海报与模板问题修复' : '打卡图片海报与模板优化';
+  }
+  if (/(?:hexiao|write-off)/i.test(paths)) return bug ? '活动核销链路问题修复' : '活动核销链路优化';
+  if (/activity-(?:level|group|grade)/i.test(paths)) return bug ? '活动分级审核问题修复' : '活动分级审核开发';
+  if (/(?:^|\/)registration(?:\/|$)/im.test(paths)) return bug ? '报名详情页问题修复' : '报名详情页优化';
+  return '';
+}
+
+function titleQualityScore(value: string): number {
+  const hanCount = (value.match(/[\p{Script=Han}]/gu) || []).length;
+  let score = Math.min(value.length, 28) + Math.min(hanCount, 16);
+  if (value.length >= 6 && value.length <= 24) score += 8;
+  if (/(活动|报名|退款|核销|打卡|详情|创建页|绑定群|埋点|海报|模板)/.test(value)) score += 10;
+  if (/(新增|实现|修复|重构|改造|升级|优化|迁移|调整|更新|开发)$/.test(value)) score += 6;
+  if (/(?:\bconst\b|container|service|serivice|commit|push|git|diff|incut_)/i.test(value)) score -= 16;
+  if (/(?:不要问|都可以|我看看|你现在|你能|是不是)/.test(value)) score -= 16;
+  if (/(?:功能开发|交付操作|问题修复|代码重构)$/.test(value)) score -= 14;
+  if (/^[A-Za-z0-9_.-]+(?:功能开发|问题修复|代码重构)$/.test(value)) score -= 12;
+  return score;
 }
 
 function contextScopeTitle(values: string[], kind: WorkItemKind): string {
@@ -39,24 +75,32 @@ function contextScopeTitle(values: string[], kind: WorkItemKind): string {
     for (const scope of scopes) counts.set(scope, (counts.get(scope) || 0) + 1);
   }
   const scope = [...counts].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))[0]?.[0];
-  if (!scope) return '';
-  return `${scope}${kind === 'refactor' ? '重构' : kindLabel(kind)}`;
+  if (scope) return `${scope}${kind === 'refactor' ? '重构' : kindLabel(kind)}`;
+  if (values.length < 2) return '';
+
+  // 合并后的工作项可能包含多个连续 turn；从全部真实请求中挑信息量最高的业务标题，
+  // 避免某一句“现在怎么实现”覆盖前面的具体需求描述。
+  return values
+    .map((value) => cleanSentence(value))
+    .map((value) => actionableTitle(value, kind, QUESTION.test(value)))
+    .filter(Boolean)
+    .sort((left, right) => contextTitleScore(right) - contextTitleScore(left) || left.length - right.length)[0] || '';
 }
 
-function branchTitle(value: string, kind: WorkItemKind): string {
-  const branch = value.trim().toLowerCase().replace(/^refs\/heads\//, '');
-  if (!branch || ['main', 'master', 'develop', 'development', 'trunk'].includes(branch)) return '';
-  const scope = branch
-    .replace(/^(?:feat|feature|fix|bugfix|refactor|chore|docs|test)\//, '')
-    .replace(/(?:^|[-_/])(?:refactor|rework|feature|fix|bugfix|chore|docs|test)(?=$|[-_/])/g, '-')
-    .replace(/^[-_/]+|[-_/]+$/g, '')
-    .replace(/[-_/]+/g, '-');
-  if (!scope) return '';
-  return `${scope}${kindLabel(kind)}`;
+function contextTitleScore(value: string): number {
+  const hanCount = (value.match(/[\p{Script=Han}]/gu) || []).length;
+  let score = Math.min(value.length, 28) + Math.min(hanCount, 16);
+  if (value.length >= 6 && value.length <= 28) score += 8;
+  if (/(新增|实现|修复|重构|改造|升级|优化|迁移|调整|更新|上移|下移|贴纸|海报|模板|上传|预览|下载|核销|报名|活动)/.test(value)) score += 6;
+  if (/^(?:这个|那个|这里|上面|下面|一版|给我|再|现在)|(?:怎么实现|能实现|分析|看看)$/.test(value)) score -= 12;
+  if (/^[A-Za-z0-9_.-]+(?:功能开发|问题修复|代码重构)$/.test(value)) score -= 10;
+  return score;
 }
 
 function actionableTitle(goal: string, kind: WorkItemKind, questionContext = false): string {
   if (!goal || isVague(goal)) return '';
+
+  if (/^贴纸[:：]/.test(goal) && /(已签到|已核销|已失效)/.test(goal)) return '签到与核销状态贴纸更新';
 
   if (/(?:代码|分支).{0,24}(?:review|评审)/i.test(goal)) return '分支代码评审';
 
@@ -81,11 +125,18 @@ function actionableTitle(goal: string, kind: WorkItemKind, questionContext = fal
     if (object && !isVague(object)) return `${object}复盘`;
   }
 
+  // “运行配置能力升级”这类名词短语已经是完整标题，末尾动作不应被误解为句中指令。
+  if (!questionContext && /^.{2,28}(?:新增|实现|修复|重构|改造|升级|优化|迁移|调整|更新|清理)$/.test(goal)) {
+    return goal;
+  }
+
   const patterns: Array<{ pattern: RegExp; label: string }> = [
     { pattern: /(?:新增|添加)(?:了)?(?:一个)?\s*(.+)/i, label: '新增' },
     { pattern: /(?:实现|开发)(?:一个)?\s*(.+)/i, label: '实现' },
     { pattern: /(?:修复|解决)(?:一下)?\s*(.+)/i, label: '修复' },
+    { pattern: /(?:改回|恢复)(?:成|到)?(?:一下)?\s*(.+)/i, label: '修复' },
     { pattern: /(?:重构|整理)(?:一下)?\s*(.+)/i, label: '重构' },
+    { pattern: /(?:收敛)(?:一下)?\s*(.+)/i, label: '重构' },
     { pattern: /(?:改造)(?:一个)?\s*(.+)/i, label: '改造' },
     { pattern: /(?:升级)(?:一个)?\s*(.+)/i, label: '升级' },
     { pattern: /(?:优化)(?:一个)?\s*(.+)/i, label: '优化' },
@@ -126,6 +177,18 @@ function actionableTitle(goal: string, kind: WorkItemKind, questionContext = fal
   if (failure?.[1]) {
     const object = cleanObject(failure[1]);
     if (object && !isVague(object)) return `${object}启动问题修复`;
+  }
+
+  const repeated = goal.match(/(.{0,28}?)(?:还是|仍然)?(?:会)?重复(请求|加载|触发|显示|提交|上报)/);
+  if (repeated) {
+    const object = cleanObject(repeated[1] || '').replace(/^往/, '');
+    return `${object ? `${object}` : ''}重复${repeated[2]}修复`;
+  }
+
+  const movement = goal.match(/(.{2,36}?)(?:上移|下移|前移|后移)/);
+  if (movement?.[1]) {
+    const object = cleanObject(movement[1]);
+    if (object && !isVague(object)) return `${object}调整`;
   }
 
   const trailingRemoval = goal.match(/^(.{2,48}?)(?:去掉|移除|删掉)$/i);
@@ -182,11 +245,13 @@ function cleanObject(value: string): string {
     .replace(/^(?:一下|一个|这个|那个|这里|上面|下面|这一页的?|第[一二三四五六七八九十\d]+个)\s*/i, '')
     .replace(/^(?:我的|我们的)\s*/i, '')
     .replace(/^(?:我看|我觉得|我发现)\s*/i, '')
+    .replace(/^我现在\s*/i, '')
+    .replace(/^不只是\s*/i, '')
     .replace(/^我从(.+?)到今天所干的事情$/i, '$1至今工作')
     .replace(/^开发整个(.+)$/i, '$1开发')
     .replace(/(?:的代码|的部分|这个部分|相关的|相关代码|的办法|的方式|的方案)$/i, '')
     .replace(/到本地$/i, '')
-    .replace(/(?:吗|呢|吧|呀|啊)$/i, '')
+    .replace(/(?:吗|呢|吧|呀|啊|把)$/i, '')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -201,7 +266,12 @@ function isVague(value: string): boolean {
 
 function isInformativeDirectTitle(value: string): boolean {
   const text = value.trim();
-  return Boolean(text && text.length >= 4 && !VAGUE_REFERENCE.test(text) && !LOW_INFORMATION.test(text));
+  return Boolean(text
+    && text.length >= 4
+    && TECHNICAL_TOPIC.test(text)
+    && !VAGUE_REFERENCE.test(text)
+    && !LOW_INFORMATION.test(text)
+    && !/(?:不要问|都可以|我看看|给我|你现在|你能|是不是)/.test(text));
 }
 
 function topicTitleFromText(value: string, kind: WorkItemKind): string {
@@ -215,7 +285,7 @@ function topicTitleFromText(value: string, kind: WorkItemKind): string {
 function fileTitle(files: string[], kind: WorkItemKind): string {
   const counts = new Map<string, number>();
   for (const file of files) {
-    if (!file || /^(?:\/tmp\/|\$\{[^}]+\}\/)|\.(?:jsonl|log)$/i.test(file)) continue;
+    if (!file || /^(?:\$\{[^}]+\}\/)|\.(?:jsonl|log)$/i.test(file)) continue;
     const parts = file.split(/[/\\]/).filter(Boolean);
     const base = parts.at(-1)?.replace(/\.[^.]+$/, '') || '';
     const scope = GENERIC_SCOPE.test(base) ? nearestScope(parts.slice(0, -1)) : base;

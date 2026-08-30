@@ -28,6 +28,10 @@ export type EvidenceLifecycleState = 'confirmed' | 'rolled_back' | 'aborted';
 export interface WorkEvidence {
   id: string;
   workItemKey: string;
+  /** 证据所属根会话，用于把子 Agent 轨迹归回用户任务。 */
+  rootSessionId?: string;
+  /** 证据所属用户 turn；同一长会话中的不同需求必须据此拆开。 */
+  turnId?: string;
   kind: 'request' | 'decision' | 'change' | 'verification' | 'delivery' | 'error';
   status: EvidenceLifecycleState;
   timestamp: string;

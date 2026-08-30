@@ -32,12 +32,7 @@ export function assembleWorkItems(
   input: WorkItemInput,
   assessments: DecisionAssessment[] = [],
 ): WorkItem[] {
-  const evidenceByRoot = groupEvidenceByRoot(input.evidence);
-  const provisional = input.activities.map((activity) => ({
-    activities: [activity],
-    evidence: evidenceByRoot.get(activity.rootSessionId || activity.id) || [],
-    fallbackKey: activity.rootSessionId || activity.id,
-  }));
+  const provisional = provisionalGroups(input.activities, input.evidence);
   const merged = new Map<string, ProvisionalGroup>();
   for (const group of provisional) {
     const goal = workGoal(group.evidence, group.activities);
@@ -45,11 +40,13 @@ export function assembleWorkItems(
     const files = materialFiles(group.evidence, group.activities);
     const repositoryKey = repositoryFor(group);
     const branch = group.evidence.find((item) => item.branch)?.branch || group.activities[0]?.gitBranch;
+    const kind = classifyGroup(goal, group);
     const subjectKey = subjectKeyFor({
       repositoryKey,
       ...(branch ? { branch } : {}),
       files,
       goal,
+      kind,
       fallbackKey: group.fallbackKey,
     });
     assessments.push(workAssessment({
@@ -70,8 +67,9 @@ export function assembleWorkItems(
     }));
     const existing = merged.get(subjectKey);
     if (existing) {
-      existing.activities.push(...group.activities);
-      existing.evidence.push(...group.evidence);
+      // 长会话会关联大量子活动；concat 不受函数参数数量上限影响。
+      existing.activities = existing.activities.concat(group.activities);
+      existing.evidence = existing.evidence.concat(group.evidence);
     } else {
       merged.set(subjectKey, group);
     }
@@ -93,7 +91,8 @@ function assembleOne(
   const evidence = uniqueById(group.evidence).sort((a, b) => a.timestamp.localeCompare(b.timestamp) || a.id.localeCompare(b.id));
   const activities = uniqueById(group.activities).sort((a, b) => a.startedAt.localeCompare(b.startedAt) || a.id.localeCompare(b.id));
   const goal = workGoal(evidence, activities);
-  const searchText = [goal, ...evidence.map((item) => item.summary), ...activities.flatMap((item) => item.userMessages)].join('\n');
+  const requestTexts = evidence.filter((item) => item.kind === 'request').map((item) => item.summary);
+  const searchText = [goal, ...evidence.map((item) => item.summary), ...(requestTexts.length ? [] : activities.flatMap((item) => item.userMessages))].join('\n');
   const workRelated = isWorkRelated(searchText, evidence);
   assessments.push(workAssessment({
     policyId: 'work.relevance', subjectId: subjectKey,
@@ -110,11 +109,7 @@ function assembleOne(
   if (!workRelated) return null;
   const files = materialFiles(evidence, activities);
   // 验证失败描述执行结果，不应反向把明确的功能开发分类成 Bug 修复。
-  const classificationText = [
-    goal,
-    ...evidence.filter((item) => !['error', 'verification'].includes(item.kind)).map((item) => item.summary),
-    ...activities.flatMap((item) => item.userMessages),
-  ].join('\n');
+  const classificationText = classificationTextFor(goal, evidence, activities);
   const kind = classifyWorkItem(goal, evidence, classificationText);
   const verifications = reduceVerifications(evidence);
   const failed = verifications.filter((item) => item.outcome === 'failed');
@@ -131,7 +126,9 @@ function assembleOne(
   const outcomes = unique([
     ...delivery.map((item) => compactFact(item.summary)),
     ...passed.map((item) => `${item.command} 通过`),
-    ...activities.flatMap((item) => item.assistantMessages.filter(isCompletionMessage).slice(-2).map(compactFact)),
+    ...(isTurnScoped(evidence)
+      ? evidence.filter((item) => item.kind === 'decision' && isCompletionMessage(item.summary)).map((item) => compactFact(item.summary))
+      : activities.flatMap((item) => item.assistantMessages.filter(isCompletionMessage).slice(-2).map(compactFact))),
   ]).filter(isUsefulFact).slice(0, 8);
   const hasExplicitCompletion = outcomes.some(isCompletionMessage);
   // 最终失败的结构化验证优先于助手的自然语言“已完成”；只有真实交付证据可以关闭它。
@@ -147,7 +144,10 @@ function assembleOne(
       : changes.length && (passed.length || hasExplicitCompletion)
         ? 'completed'
         : 'in_progress';
-  const durationReliable = activities.every((item) => item.durationReliable);
+  const scopedDuration = turnDuration(evidence);
+  const durationReliable = isTurnScoped(evidence)
+    ? scopedDuration !== null
+    : activities.every((item) => item.durationReliable);
   const evidenceIds = evidence.map((item) => item.id);
   const branch = evidence.find((item) => item.branch)?.branch || activities.find((item) => item.gitBranch)?.gitBranch;
   const commits = unique(evidence.map((item) => item.commit || ''));
@@ -165,7 +165,7 @@ function assembleOne(
       outcomes,
       files,
       kind,
-      activities.flatMap((activity) => activity.userMessages),
+      requestTexts.length ? requestTexts : activities.flatMap((activity) => activity.userMessages),
       branch,
     ),
     goal,
@@ -179,13 +179,13 @@ function assembleOne(
     changes,
     verifications,
     blockers: unresolvedFailures.map((item) => `${item.command} 最终失败${item.exitCode === null ? '' : `（退出码 ${item.exitCode}）`}`),
-    startedAt: activities[0]?.startedAt || evidence[0]?.timestamp || '',
-    endedAt: activities.at(-1)?.endedAt || evidence.at(-1)?.timestamp || '',
-    activeMinutes: durationReliable
-      ? mergedActiveDurationMinutes(activities)
-      : null,
+    startedAt: isTurnScoped(evidence) ? evidence[0]?.timestamp || '' : activities[0]?.startedAt || evidence[0]?.timestamp || '',
+    endedAt: isTurnScoped(evidence) ? evidence.at(-1)?.timestamp || '' : activities.at(-1)?.endedAt || evidence.at(-1)?.timestamp || '',
+    activeMinutes: isTurnScoped(evidence)
+      ? scopedDuration
+      : durationReliable ? mergedActiveDurationMinutes(activities) : null,
     durationReliable,
-    sessionIds: activities.map((item) => item.id),
+    sessionIds: unique(activities.map((item) => item.id)),
     evidenceIds,
     confidence: evidence.every((item) => item.confidence !== 'unknown') ? 'confirmed' : 'partial',
   };
@@ -247,15 +247,66 @@ function assembleOne(
   return item;
 }
 
-function groupEvidenceByRoot(evidence: WorkEvidence[]): Map<string, WorkEvidence[]> {
-  const result = new Map<string, WorkEvidence[]>();
+function provisionalGroups(activities: Activity[], evidence: WorkEvidence[]): ProvisionalGroup[] {
+  const byWorkItem = new Map<string, WorkEvidence[]>();
   for (const item of evidence) {
-    const root = item.workItemKey.split('|').at(-1) || item.workItemKey;
-    const values = result.get(root) || [];
+    const values = byWorkItem.get(item.workItemKey) || [];
     values.push(item);
-    result.set(root, values);
+    byWorkItem.set(item.workItemKey, values);
   }
-  return result;
+  const activitiesByRoot = new Map<string, Activity[]>();
+  for (const activity of activities) {
+    const root = activity.rootSessionId || activity.id;
+    const values = activitiesByRoot.get(root) || [];
+    values.push(activity);
+    activitiesByRoot.set(root, values);
+  }
+  const rootsWithEvidence = new Set<string>();
+  const groups = [...byWorkItem].map(([fallbackKey, values]) => {
+    const root = evidenceRoot(values[0]);
+    if (root) rootsWithEvidence.add(root);
+    return {
+      activities: root ? activitiesByRoot.get(root) || [] : [],
+      evidence: values,
+      fallbackKey,
+    };
+  });
+  for (const [root, values] of activitiesByRoot) {
+    if (!rootsWithEvidence.has(root)) groups.push({ activities: values, evidence: [], fallbackKey: root });
+  }
+  return groups;
+}
+
+function evidenceRoot(item?: WorkEvidence): string {
+  if (!item) return '';
+  if (item.rootSessionId) return item.rootSessionId;
+  const parts = item.workItemKey.split('|');
+  return parts.at(-1)?.startsWith('turn:') ? parts.at(-2) || '' : parts.at(-1) || '';
+}
+
+function classifyGroup(goal: string, group: ProvisionalGroup) {
+  return classifyWorkItem(goal, group.evidence, classificationTextFor(goal, group.evidence, group.activities));
+}
+
+function classificationTextFor(goal: string, evidence: WorkEvidence[], activities: Activity[]): string {
+  const requests = evidence.filter((item) => item.kind === 'request').map((item) => item.summary);
+  return [
+    goal,
+    ...evidence.filter((item) => !['error', 'verification'].includes(item.kind)).map((item) => item.summary),
+    ...(requests.length ? [] : activities.flatMap((item) => item.userMessages)),
+  ].join('\n');
+}
+
+function isTurnScoped(evidence: WorkEvidence[]): boolean {
+  return evidence.some((item) => Boolean(item.turnId) || item.workItemKey.split('|').at(-1)?.startsWith('turn:'));
+}
+
+function turnDuration(evidence: WorkEvidence[]): number | null {
+  if (evidence.length < 2) return null;
+  const startedAt = Date.parse(evidence[0]?.timestamp || '');
+  const endedAt = Date.parse(evidence.at(-1)?.timestamp || '');
+  if (!Number.isFinite(startedAt) || !Number.isFinite(endedAt) || endedAt < startedAt) return null;
+  return Math.max(1, Math.ceil((endedAt - startedAt) / 60_000));
 }
 
 function repositoryFor(group: ProvisionalGroup): string {
@@ -270,10 +321,11 @@ function unique(values: string[]): string[] {
 }
 
 function materialFiles(evidence: WorkEvidence[], activities: Activity[]): string[] {
+  const scoped = isTurnScoped(evidence);
   return unique([
     ...evidence.filter((item) => item.kind === 'change').flatMap((item) => item.files),
-    ...activities.flatMap((item) => item.changedFiles),
-  ]);
+    ...(scoped ? [] : activities.flatMap((item) => item.changedFiles)),
+  ]).filter((file) => !/(?:^|\/)(?:node_modules|\.git|dist|coverage)(?:\/|$)|\.tsbuildinfo$|\.(?:log|jsonl)$/i.test(file));
 }
 
 function uniqueById<T extends { id: string }>(values: T[]): T[] {

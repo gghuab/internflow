@@ -11,6 +11,70 @@ import {
 import { devLogPrompt } from '../src/reports/dev-log/prompt.js';
 
 describe('dev log candidate projection', () => {
+  it('merges same-domain requirement turns but keeps regression fixes separate on the same branch', () => {
+    const candidates = projectDevLogCandidates([
+      item({
+        id: 'poster', subjectKey: 'poster', kind: 'feature', title: '打卡成功图片海报生成',
+        branch: 'feat/checkin-strategy-optimization',
+        changes: [{ ...change(), files: ['src/features/check-in/poster.ts'] }],
+      }),
+      item({
+        id: 'upload', subjectKey: 'upload', kind: 'feature', title: '打卡图片上传入口调整',
+        branch: 'feat/checkin-strategy-optimization',
+        changes: [{ ...change(), files: ['src/features/check-in/upload.ts'] }],
+      }),
+      item({
+        id: 'regression', subjectKey: 'regression', kind: 'bugfix', title: '模板滑动跳页修复',
+        branch: 'feat/checkin-strategy-optimization',
+        changes: [{ ...change(), files: ['src/features/check-in/swiper.ts'] }],
+      }),
+    ]);
+
+    expect(candidates).toHaveLength(2);
+    expect(candidates.find((candidate) => candidate.section === 'requirement')).toMatchObject({
+      title: '打卡成功图片海报生成',
+      evidenceIds: expect.arrayContaining(['change']),
+    });
+    expect(candidates.find((candidate) => candidate.section === 'bugfix')?.title).toBe('模板滑动跳页修复');
+  });
+
+  it('does not merge two requirement domains merely because they share a branch', () => {
+    const candidates = projectDevLogCandidates([
+      item({
+        id: 'payment', subjectKey: 'payment', kind: 'feature', title: '支付确认', branch: 'feat/mixed',
+        changes: [{ ...change(), files: ['src/features/payment/confirm.ts'] }],
+      }),
+      item({
+        id: 'profile', subjectKey: 'profile', kind: 'feature', title: '资料编辑', branch: 'feat/mixed',
+        changes: [{ ...change(), files: ['src/features/profile/edit.ts'] }],
+      }),
+    ]);
+
+    expect(candidates).toHaveLength(2);
+  });
+
+  it('merges one requirement across different temporary worktree roots', () => {
+    const candidates = projectDevLogCandidates([
+      item({
+        id: 'left', subjectKey: 'left', kind: 'feature', title: '支付确认新增', branch: 'feat/payment',
+        changes: [{ ...change(), files: ['/tmp/worktree-a/apps/client/src/features/payment/confirm.ts'] }],
+      }),
+      item({
+        id: 'right', subjectKey: 'right', kind: 'feature', title: '支付结果完善', branch: 'feat/payment',
+        changes: [{ ...change(), files: ['/private/tmp/worktree-b/apps/client/src/features/payment/result.ts'] }],
+      }),
+    ]);
+
+    expect(candidates).toHaveLength(1);
+  });
+
+  it('keeps plugin workflow changes out of the requirement document', () => {
+    expect(projectDevLogCandidates([item({
+      id: 'plugin', kind: 'feature', title: '开发流程策略调整', branch: 'fix/workflow',
+      changes: [{ ...change(), files: ['plugins/aiden-agent/skills/workflow/policy.json'] }],
+    })])).toEqual([]);
+  });
+
   it('keeps durable development while excluding research and report tooling', () => {
     const result = projectDevLogCandidates([
       item({ id: 'feature', kind: 'feature', changes: [change()] }),
@@ -145,7 +209,7 @@ src/launch-activity/plan.md`,
     });
   });
 
-  it('keeps a strongly matched requirement fix inside the requirement instead of creating an ISSUE', () => {
+  it('keeps a strongly matched requirement regression as an ISSUE with a requirement relation', () => {
     const [candidate] = projectDevLogCandidates([item({
       kind: 'bugfix',
       title: '群聊打卡排行榜 Lynx 化',
@@ -179,16 +243,17 @@ apps/interest-chat-group-activity/src/pages/check-in/rank-list/components/RankCo
     }, {}, [], '2026-07-26');
 
     expect(resolved).toMatchObject({
-      section: 'requirement',
-      operation: 'append',
-      subjectHeading: 'REQ-004｜群聊打卡排行榜 Lynx 化',
+      section: 'bugfix',
+      operation: 'create',
+      subjectHeading: 'ISSUE-001｜群聊打卡排行榜 Lynx 化',
+      relatedRequirementHeading: 'REQ-004｜群聊打卡排行榜 Lynx 化',
     });
     expect(resolved?.writeTargets).toContainEqual(expect.objectContaining({
-      ref: 'rank-changes',
-      role: 'change-log',
-      operation: 'append',
+      ref: 'issues',
+      role: 'issue',
+      operation: 'create',
     }));
-    expect(resolved?.writeTargets.some((target) => target.role === 'issue')).toBe(false);
+    expect(resolved?.writeTargets.some((target) => target.role === 'change-log')).toBe(false);
   });
 
   it('still creates an ISSUE when a bug fix has no confident requirement match', () => {
@@ -523,7 +588,7 @@ commit: 8c459885
     expect(prompt).toContain('不得生成空章节');
     expect(prompt).toContain('文档注释，非源码');
     expect(prompt).toContain('Mermaid');
-    expect(prompt).toContain('不能因为标题中出现“修复”就自动归到 bugfix');
+    expect(prompt).toContain('同一分支可以包含多个需求、回归修复和交付操作');
     expect(prompt).toContain('candidate.status 只描述当天工作项');
   });
 });

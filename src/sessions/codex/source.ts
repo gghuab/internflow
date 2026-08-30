@@ -43,7 +43,8 @@ export class CodexSource implements SourcePlugin {
       : '';
     const manifest = await buildSessionManifest(files);
     const configKey = JSON.stringify({
-      workSemanticVersion: 6,
+      // 工作项已改为按轮次识别；升级缓存版本，防止继续复用旧的整会话聚合结果。
+      workSemanticVersion: 8,
       includeAssistantMessages: config.includeAssistantMessages ?? true,
       includeToolOutput: config.includeToolOutput ?? true,
       dayEndTime: config.dayEndTime || '23:30',

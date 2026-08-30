@@ -62,15 +62,10 @@ export function resolveDevLogCandidates(
   const resolved = candidates.flatMap<ResolvedDevLogCandidate>((candidate) => {
     const bound = findBoundHeading(headings, boundTargets[candidate.subjectKey]);
     const boundSubject = bound ? enclosingHeading(headings, bound, 3) : undefined;
-    const boundRequirementFix = candidate.section === 'bugfix'
-      && boundSubject?.section === 'requirement';
-    const boundCandidate: DevLogCandidate = boundRequirementFix
-      ? { ...candidate, section: 'requirement' }
-      : candidate;
-    if (boundSubject?.section === boundCandidate.section) {
+    if (boundSubject?.section === candidate.section) {
       const target = appendTarget(headings, boundSubject);
       const writeTargets = existingWriteTargets(
-        boundCandidate,
+        candidate,
         headings,
         snapshot.markdown || '',
         boundSubject,
@@ -78,18 +73,16 @@ export function resolveDevLogCandidates(
         date,
       );
       const assessment = routingAssessment(
-        boundCandidate,
+        candidate,
         target,
         'append',
         1,
         1,
-        boundRequirementFix
-          ? '稳定主题绑定指向已有需求，本次问题修复继续写入该需求'
-          : '已存在稳定主题绑定，直接追加',
+        '已存在同分类的稳定主题绑定，直接追加',
       );
       assessments.push(assessment);
       return [{
-        ...boundCandidate,
+        ...candidate,
         operation: 'append',
         subjectHeading: boundSubject.text,
         allowedTargetRefs: unique(writeTargets.map((item) => item.ref)),
@@ -134,16 +127,19 @@ export function resolveDevLogCandidates(
     const requirementBest = requirementAlternatives[0];
     const requirementMargin = alternativeMargin(requirementAlternatives);
     const requirementMatch = isRequirementAffinity(requirementBest, requirementMargin);
-    const routedCandidate: DevLogCandidate = requirementMatch
-      ? { ...candidate, section: 'requirement' }
-      : candidate;
-    const alternatives = requirementMatch ? requirementAlternatives : nativeAlternatives;
+    // 需求相似度只建立“关联需求”，不能把回归修复从 ISSUE 改写成 REQ。
+    const relatedRequirementHeading = candidate.section === 'bugfix'
+      ? boundSubject?.section === 'requirement'
+        ? boundSubject.text
+        : requirementMatch ? requirementBest?.heading : undefined
+      : undefined;
+    const alternatives = nativeAlternatives;
     const best = alternatives[0];
     const margin = alternativeMargin(alternatives);
-    const root = roots.find((heading) => heading.section === routedCandidate.section);
+    const root = roots.find((heading) => heading.section === candidate.section);
     if (!root) return [];
 
-    const operation = exactBranchRef || requirementMatch || isConfidentAppend(best, margin)
+    const operation = exactBranchRef || isConfidentAppend(best, margin)
       ? 'append'
       : 'create';
     const suggestedTargetRef = operation === 'append' && best ? best.targetRef : root.ref;
@@ -155,35 +151,36 @@ export function resolveDevLogCandidates(
       : '';
     const writeTargets = operation === 'append' && subjectHeading
       ? existingWriteTargets(
-        routedCandidate,
+        candidate,
         headings,
         snapshot.markdown || '',
         subjectHeading,
         headings.find((heading) => heading.ref === suggestedTargetRef) || subjectHeading,
         date,
       )
-      : [createWriteTarget(routedCandidate, root, createdHeading)];
+      : [createWriteTarget(candidate, root, createdHeading)];
     const assessment = routingAssessment(
-      routedCandidate,
+      candidate,
       operation === 'append' && best ? { ref: best.targetRef, text: best.heading } : root,
       operation,
       best?.score || 0,
       margin,
-      requirementMatch
-        ? '问题修复与已有需求的业务目标和代码范围高度一致，作为需求内增量写入'
-        : exactBranchRef
-          ? '文档中只有一个需求精确记录了相同开发分支，沿用该稳定需求'
+      exactBranchRef
+          ? '文档中只有一个同分类记录精确包含相同开发分支，沿用该稳定主题'
         : operation === 'append'
           ? '最佳目标达到相似度门槛，且与次优目标差距足够明确'
-          : '没有唯一可信的已有主题，保守地在对应分类下新建记录',
+          : relatedRequirementHeading
+            ? `这是与“${relatedRequirementHeading}”相关的回归修复；保留 ISSUE 分类并新建问题记录`
+            : '没有唯一可信的已有主题，保守地在对应分类下新建记录',
       alternatives,
     );
     assessments.push(assessment);
 
     return [{
-      ...routedCandidate,
+      ...candidate,
       operation,
       subjectHeading: subjectHeading?.text || createdHeading,
+      ...(relatedRequirementHeading ? { relatedRequirementHeading } : {}),
       allowedTargetRefs: unique(writeTargets.map((item) => item.ref)),
       writeTargets,
       routingAssessmentId: assessment.id,

@@ -1,10 +1,12 @@
 import type { Activity, WorkEvidence } from '../../core/contracts/index.js';
 
 export function workGoal(evidence: WorkEvidence[], activities: Activity[]): string {
-  const candidates = [
-    ...evidence.filter((item) => item.kind === 'request').map((item) => cleanRequest(item.summary)),
-    ...activities.flatMap((item) => [item.firstUserMessage, ...item.userMessages]).map(cleanRequest),
-  ].filter(Boolean);
+  const requests = evidence.filter((item) => item.kind === 'request').map((item) => cleanRequest(item.summary));
+  // 精准采集已经按 turn 切分时，只看该 turn 的请求，禁止整条长会话的后续追问污染目标。
+  const candidates = (requests.length
+    ? requests
+    : activities.flatMap((item) => [item.firstUserMessage, ...item.userMessages]).map(cleanRequest))
+    .filter(Boolean);
   return [...new Set(candidates)].sort((a, b) => goalScore(b) - goalScore(a) || a.length - b.length)[0] || '';
 }
 
@@ -59,7 +61,9 @@ const TECHNICAL_OBJECT = /(接口|字段|页面|组件|模块|样式|分支|脚�
 
 function goalScore(value: string): number {
   let score = value.length >= 6 && value.length <= 180 ? 5 : 0;
-  if (/(实现|修复|新增|添加|重构|改造|修改|解决|恢复|删除|清理|对齐|去掉|推送|发布(?!器)|部署|拉取|合并|\bbug\b)/i.test(value)) score += 9;
+  // 接口返回样例只是上一轮问题的上下文，不能压过真实用户目标。
+  if (/^[{[]/.test(value) || /"(?:status_code|status_msg|data|result)"\s*:/.test(value)) score -= 30;
+  if (/(实现|修复|新增|添加|重构|改造|修改|解决|恢复|改回|回退|撤回|删除|清理|对齐|去掉|推送|发布(?!器)|部署|拉取|合并|\bbug\b)/i.test(value)) score += 9;
   else if (/(分析|解析|研究|总结|复盘|优化|升级|迁移|接口|字段|页面|流程|项目|工具)/.test(value)) score += 5;
   if (TECHNICAL_OBJECT.test(value)) score += 3;
   // 故障/启动症状是有效目标信号，不依赖具体产品名。
@@ -70,6 +74,7 @@ function goalScore(value: string): number {
   if (/^(?:(?:你)?帮我)?(?:直接)?(?:恢复|修复|修改|删除|清理|调整|处理|弄|改|做)(?:一下)?(?:啊|吧|呀)?$/i.test(value)) score -= 12;
   if (/^第[一二三四五六七八九十\d]+个/.test(value) && !TECHNICAL_OBJECT.test(value)) score -= 12;
   if (/^(?:看不了|没看到|打不开|不行|没用)(?:了|啊|呀|吧)?$/.test(value)) score -= 7;
+  if (/^(?:这里|这个|那个|上面|下面)?.{0,16}(?:有这个吗|为啥|为什么|怎么回事|好实现吗)[，,。.!！?？]*$/.test(value)) score -= 10;
   if (/^(噢|哦|明白|所以|也就是说|对)[~，,\s]/.test(value)) score -= 6;
   if (/(?:这个|那个|这部分|这个问题)(?:没看懂|看不懂)?$/.test(value) && !TECHNICAL_OBJECT.test(value)) score -= 6;
   if (/^https?:\/\//.test(value)) score -= 2;

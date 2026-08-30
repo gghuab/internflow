@@ -5,15 +5,15 @@ import { describe, expect, it } from 'vitest';
 import { DevLogEvidenceLedger } from '../src/reports/dev-log/ledger.js';
 import type { DevLogCandidate } from '../src/reports/dev-log/types.js';
 
-describe('dev log evidence ledger v2', () => {
-  it('migrates v1 evidence without losing deduplication', async () => {
+describe('dev log evidence ledger v3', () => {
+  it('invalidates legacy semantic bindings so historical evidence can be reclassified', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'internflow-ledger-v1-'));
     const path = join(directory, 'ledger.json');
     await writeFile(path, JSON.stringify({ version: 1, evidence: {
       e1: { evidenceId: 'e1', targetRef: 'h1', syncedAt: '2026-07-15T10:00:00Z' },
     } }));
     const ledger = new DevLogEvidenceLedger(path);
-    expect(await ledger.pendingCandidates([candidate({ evidenceIds: ['e1'] })])).toEqual([]);
+    expect(await ledger.pendingCandidates([candidate({ evidenceIds: ['e1'] })])).toHaveLength(1);
   });
 
   it('persists subject bindings and content fingerprints only after markSynced', async () => {
@@ -41,7 +41,9 @@ describe('dev log evidence ledger v2', () => {
     expect(await ledger.subjectBindings()).toEqual({
       subject: { blockId: 'block-1', headingText: 'REQ-001｜功能实现' },
     });
-    expect(JSON.parse(await readFile(path, 'utf8')).version).toBe(2);
+    const stored = JSON.parse(await readFile(path, 'utf8'));
+    expect(stored.version).toBe(3);
+    expect(stored.semanticVersion).toBe('2.0.0');
     expect((await stat(path)).mode & 0o777).toBe(0o600);
   });
 

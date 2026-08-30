@@ -75,6 +75,54 @@ describe('Codex event ledger', () => {
     expect(capture.snapshot.evidence.filter((item) => item.verification)).toHaveLength(1);
   });
 
+  it('assigns separate work item keys to separate user turns in one long session', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'internflow-turn-work-items-'));
+    const directory = join(root, '2026', '07', '16');
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, 'session.jsonl'), lines([
+      event('2026-07-16T01:00:00.000Z', 'session_meta', { id: 'session', cwd: '/workspace/app', git: { branch: 'feat/write-off' } }),
+      message('2026-07-16T01:01:00.000Z', 'user', '新增核销结果页'),
+      customCall('2026-07-16T01:02:00.000Z', 'patch-1', 'apply_patch', 'M src/write-off/result.ts'),
+      customOutput('2026-07-16T01:02:01.000Z', 'patch-1', 'Done!'),
+      message('2026-07-16T01:03:00.000Z', 'user', '修复结果页空白回归'),
+      customCall('2026-07-16T01:04:00.000Z', 'patch-2', 'apply_patch', 'M src/write-off/result.ts'),
+      customOutput('2026-07-16T01:04:01.000Z', 'patch-2', 'Done!'),
+    ]));
+
+    const capture = await captureCodexDay(root, '2026-07-16', 'Asia/Shanghai');
+    const requests = capture.snapshot.evidence.filter((item) => item.kind === 'request');
+    const changes = capture.snapshot.evidence.filter((item) => item.kind === 'change');
+
+    expect(new Set(requests.map((item) => item.workItemKey)).size).toBe(2);
+    expect(new Set(changes.map((item) => item.workItemKey)).size).toBe(2);
+    expect(requests.every((item) => Boolean(item.turnId))).toBe(true);
+  });
+
+  it('keeps a vague approval turn with the preceding explicit requirement', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'internflow-continuation-turn-'));
+    const directory = join(root, '2026', '07', '16');
+    await mkdir(directory, { recursive: true });
+    await writeFile(join(directory, 'session.jsonl'), lines([
+      event('2026-07-16T01:00:00.000Z', 'session_meta', { id: 'session', cwd: '/workspace/app' }),
+      message('2026-07-16T01:01:00.000Z', 'user', '新增报名页退款提示'),
+      message('2026-07-16T01:02:00.000Z', 'user', '开始修改吧'),
+      customCall('2026-07-16T01:03:00.000Z', 'patch-1', 'apply_patch', 'M src/registration/refund.tsx'),
+      customOutput('2026-07-16T01:03:01.000Z', 'patch-1', 'Done!'),
+      message('2026-07-16T01:04:00.000Z', 'user', '修复退款提示打不开的回归'),
+      customCall('2026-07-16T01:05:00.000Z', 'patch-2', 'apply_patch', 'M src/registration/refund.tsx'),
+      customOutput('2026-07-16T01:05:01.000Z', 'patch-2', 'Done!'),
+    ]));
+
+    const capture = await captureCodexDay(root, '2026-07-16', 'Asia/Shanghai');
+    const requests = capture.snapshot.evidence.filter((item) => item.kind === 'request');
+    const changes = capture.snapshot.evidence.filter((item) => item.kind === 'change');
+
+    expect(requests[0]?.workItemKey).toBe(requests[1]?.workItemKey);
+    expect(changes[0]?.workItemKey).toBe(requests[0]?.workItemKey);
+    expect(requests[2]?.workItemKey).not.toBe(requests[0]?.workItemKey);
+    expect(changes[1]?.workItemKey).toBe(requests[2]?.workItemKey);
+  });
+
   it('accounts for tool search calls and outputs as supported paired events', async () => {
     const root = await mkdtemp(join(tmpdir(), 'internflow-tool-search-'));
     const directory = join(root, '2026', '07', '16');

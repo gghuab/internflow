@@ -15,6 +15,7 @@ export function buildWorkEvidence(events: NormalizedCodexEvent[]): WorkEvidence[
     && event.localDate
   ));
   const metadata = sessionMetadata(events);
+  const effectiveTurns = effectiveTurnIds(confirmed);
   const outputs = new Map<string, NormalizedCodexEvent>();
   for (const event of confirmed) {
     if (event.callId && ['tool_output', 'command_result', 'mcp_result'].includes(event.kind)) {
@@ -24,7 +25,11 @@ export function buildWorkEvidence(events: NormalizedCodexEvent[]): WorkEvidence[
   const result: WorkEvidence[] = [];
   for (const event of confirmed) {
     const meta = metadata.get(event.sessionId) || { workspace: '', branch: '' };
-    const workItemKey = [meta.workspace, meta.branch, event.rootSessionId || event.sessionId]
+    const rootSessionId = event.rootSessionId || event.sessionId;
+    // 一个 Codex 会话可能连续处理多个互不相关的需求。turn 是最小可靠任务边界；
+    // 分支只保留为上下文，不能再把整条分支压成一个需求。
+    const effectiveTurnId = effectiveTurns.get(`${rootSessionId}|${event.turnId || ''}`) || event.turnId;
+    const workItemKey = [meta.workspace, meta.branch, rootSessionId, effectiveTurnId ? `turn:${effectiveTurnId}` : '']
       .filter(Boolean).join('|');
     if (event.kind === 'message') {
       const message = messageValue(event);
@@ -84,6 +89,42 @@ export function buildWorkEvidence(events: NormalizedCodexEvent[]): WorkEvidence[
   return uniqueEvidence(result);
 }
 
+function effectiveTurnIds(events: NormalizedCodexEvent[]): Map<string, string> {
+  const result = new Map<string, string>();
+  const lastIntentByRoot = new Map<string, string>();
+  for (const event of events) {
+    if (!event.turnId || event.kind !== 'message') continue;
+    const message = messageValue(event);
+    if (message?.role !== 'user' || !message.text || isInjectedContext(message.text)) continue;
+    const root = event.rootSessionId || event.sessionId;
+    const key = `${root}|${event.turnId}`;
+    if (result.has(key)) continue;
+    const previous = lastIntentByRoot.get(root);
+    if (previous && isContinuationRequest(message.text)) {
+      result.set(key, previous);
+    } else {
+      result.set(key, event.turnId);
+      lastIntentByRoot.set(root, event.turnId);
+    }
+  }
+  return result;
+}
+
+function isContinuationRequest(value: string): boolean {
+  const text = value.replace(/\s+/g, ' ').trim();
+  if (!text) return true;
+  if (/^[{[]/.test(text)) {
+    try {
+      JSON.parse(text);
+      return true;
+    } catch {
+      // 带说明的 JSON 请求仍应作为新意图处理。
+    }
+  }
+  return /^(?:好(?:的)?|可以|行|没问题|开始(?:修改|处理|执行)?|执行|继续|改一下|改吧|做吧|就这样|按(?:这个|上面(?:说的)?))(?:吧|了|，?不要问我(?:了)?|，?都可以执行)*[。.!！]*$/i.test(text)
+    || /^可以执行[，,]?不要问我[，,]?都可以执行[。.!！]*$/i.test(text);
+}
+
 interface SessionMeta {
   workspace: string;
   branch: string;
@@ -135,6 +176,8 @@ function createEvidenceGroup(
   return {
     id: evidenceId(kind, ids),
     workItemKey,
+    ...(first.rootSessionId || first.sessionId ? { rootSessionId: first.rootSessionId || first.sessionId } : {}),
+    ...(first.turnId ? { turnId: first.turnId } : {}),
     kind,
     status: first.lifecycle,
     timestamp: first.timestamp,

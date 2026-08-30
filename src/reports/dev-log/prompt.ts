@@ -39,10 +39,11 @@ export function devLogPrompt(batch: ActivityBatch, snapshot: SinkSnapshot): stri
 - 只记录公司业务需求及其开发、联调、修复和可复用工程经验；个人项目、本机工具、模型代理和环境配置不得写入。
 
 归类要求：
-- 先判断工作属于哪个业务需求，再判断它是开发、联调还是修复；不能因为标题中出现“修复”就自动归到 bugfix。
+- 先判断当天动作是在实现尚未完成的验收目标，还是在恢复已经存在但发生异常的行为：前者属于 requirement，后者属于 bugfix。
 - operation、writeTargets 和 routingAssessmentId 已由本地策略确定。你只能完成计划中的写入，不得自行比较标题或改写归属位置。
 - role=change-log 只保留当天历史增量；role=requirement-overview/background/design/implementation/verification/retrospective 维护对应的当前事实。
-- 只有脱离具体需求、具备独立现象、影响、根因、修复和验证价值的线上或联调缺陷，才归入 bugfix。
+- bugfix 即使与旧需求高度相关，也必须保留 ISSUE 分类；relatedRequirementHeading 非空时，在正文中明确写出“关联需求”，不得把它改写成 REQ 增量。
+- 同一分支可以包含多个需求、回归修复和交付操作；分支名只能作为交付证据，不能作为需求标题或归类依据。
 - operation=create 表示在分类根节点创建新条目；append 表示保留原文并追加；replace 表示输出该小节的完整最新版本。
 - replace 必须保留目标小节中仍然有效的原有事实，只删除被当天证据明确推翻的内容，再合并当天新增事实；不得因输入只包含当天增量而丢掉历史仍有效内容。
 - candidate.status 只描述当天工作项，不等于长期需求生命周期；当天子任务 completed 不能关闭旧阻塞或把整个需求改成已完成，除非 facts 或 verificationSummary 明确证明旧问题已解决。
@@ -51,7 +52,7 @@ export function devLogPrompt(batch: ActivityBatch, snapshot: SinkSnapshot): stri
 正式文档分为四部分：
 - overview「一、开发总览」：同步当前需求状态、当天最近更新和仍未解决的待确认事项；表格必须保留未受影响需求的行。
 - requirement「二、需求开发记录」：按需求维护稳定档案，并把每日新增事实追加到该需求的「变更记录」。
-- bugfix「三、问题与修复记录」：每个独立问题使用一个明确的 ISSUE 标题；需求推进中的普通修复留在需求变更记录，避免重复。
+- bugfix「三、问题与修复记录」：每个恢复既有行为、修正异常或处理回归的问题使用明确的 ISSUE 标题；相关旧需求通过“关联需求”建立引用，不改变分类。
 - insight「四、工程经验沉淀」：只收录能跨需求复用的方法、机制和反模式，不记录普通操作流水或文档维护规则。
 
 requirement 写法：

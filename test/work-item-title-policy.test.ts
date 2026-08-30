@@ -23,6 +23,14 @@ describe('title and meta policy without project overfit', () => {
     expect(goal).not.toBe('第三个我修复了');
   });
 
+  it('keeps an explicit regression symptom ahead of a pasted JSON response', () => {
+    const goal = workGoal([
+      request('我现在往下滑还是会重复请求'),
+      request('{"status_code":0,"status_msg":"success","data":{"items":[]}}'),
+    ], [activity('我现在往下滑还是会重复请求')]);
+    expect(goal).toBe('我现在往下滑还是会重复请求');
+  });
+
   it('keeps business phrases that used to match personal demote sentences', () => {
     const title = inferWorkItemTitle(
       '发布器也拉不起来',
@@ -36,6 +44,29 @@ describe('title and meta policy without project overfit', () => {
 
   it('titles a margin-removal goal without a hardcoded 两边留白 rewrite', () => {
     expect(inferWorkItemTitle('卡片现在两边留白去掉', [], [], 'bugfix')).toBe('卡片现在两边留白修复');
+  });
+
+  it('prefers a concrete product scope over conversational implementation chatter', () => {
+    expect(inferWorkItemTitle(
+      'const sessionService 不要通过 container get 了',
+      [],
+      ['apps/client/src/sub-packages/activity/launch-activity/hooks/use-page-tracking.ts'],
+      'refactor',
+    )).toBe('活动创建页埋点服务重构');
+  });
+
+  it('derives a readable requirement name from a concrete product component', () => {
+    expect(inferWorkItemTitle(
+      '改一下吧',
+      [],
+      ['apps/client/src/sub-packages/activity/registration/components/RefundPolicyNotice/index.tsx'],
+      'feature',
+    )).toBe('报名详情退款提示优化');
+  });
+
+  it('uses a concrete repeated-request symptom as the bug title', () => {
+    expect(inferWorkItemTitle('我现在往下滑还是会重复请求', [], ['src/hooks/useLoadMore.ts'], 'bugfix'))
+      .toBe('下滑重复请求修复');
   });
 
   it('does not treat pet/product domain words as built-in meta noise', () => {
