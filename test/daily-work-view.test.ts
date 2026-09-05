@@ -469,6 +469,45 @@ describe('daily work view', () => {
     expect(normalized.takeaways).toEqual([]);
   });
 
+  it('drops optional summaries outside their local candidate allowlists', () => {
+    const takeawayOnly = item({
+      id: 'takeaway-only',
+      actions: ['核对现状', '形成复用方法'],
+      decisions: ['以后默认先核对事实'],
+    });
+    const projected = projectDailyWorkItems([takeawayOnly], { type: 'codex' });
+    const view = {
+      ...projected,
+      deepDiveCandidateIds: [],
+      takeawayCandidateIds: ['takeaway-only'],
+    };
+    const fallback = fallbackDailyDraft(view);
+    const normalized = validateDailyDraft(view, {
+      ...fallback,
+      deepDives: [{
+        workItemId: 'takeaway-only',
+        title: '错误栏目',
+        conclusion: '不应进入技术沉淀。',
+        mechanism: '模型没有遵守候选列表。',
+        evidence: '本地白名单可以识别。',
+        boundary: '只过滤可选总结。',
+        evidenceIds: takeawayOnly.evidenceIds,
+      }],
+      takeaways: [{
+        workItemId: 'not-a-work-item',
+        method: '错误方法',
+        applicability: '无',
+        defaultAction: '无',
+        completionCriteria: '无',
+        avoid: '无',
+        evidenceIds: [],
+      }],
+    });
+
+    expect(normalized.deepDives).toEqual([]);
+    expect(normalized.takeaways).toEqual([]);
+  });
+
   it('filters conversation fragments from progress-based inline visuals', () => {
     const workItem = item({
       id: 'dialogue',

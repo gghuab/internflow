@@ -6,6 +6,7 @@ import { internFlowConfigSchema } from '../src/core/config.js';
 import type { RunContext } from '../src/core/contracts/index.js';
 import {
   assertHeadingsUnchanged,
+  isLarkIdentityAvailable,
   LarkSink,
   lastBlockId,
   parseOutline,
@@ -19,6 +20,9 @@ afterEach(() => {
   delete process.env.CAPTURE_INPUT;
   delete process.env.INVOKED_PATH;
   delete process.env.INTERNFLOW_STATE_DIR;
+  delete process.env.LARKSUITE_CLI_USER_ACCESS_TOKEN;
+  delete process.env.LARKSUITE_CLI_APP_ID;
+  delete process.env.INTERNFLOW_LARK_CHUNK_DELAY_MS;
 });
 
 describe('Lark structured append helpers', () => {
@@ -35,6 +39,16 @@ describe('Lark structured append helpers', () => {
       { ref: 'h5', blockId: 'issue', section: 'bugfix' },
       { ref: 'h6', blockId: 'insight', section: 'insight' },
     ]);
+  });
+
+  it('requires the configured Lark identity to be available', () => {
+    expect(isLarkIdentityAvailable(JSON.stringify({
+      identities: { user: { available: false }, bot: { available: true } },
+    }), 'user')).toBe(false);
+    expect(isLarkIdentityAvailable(JSON.stringify({
+      identities: { user: { available: true } },
+    }), 'user')).toBe(true);
+    expect(isLarkIdentityAvailable('not-json', 'user')).toBe(false);
   });
 
   it('recognizes the current four-part document structure', () => {
@@ -386,6 +400,8 @@ printf '# Legacy fast Markdown\n'
 `);
     await chmod(lark, 0o755);
     await chmod(parser, 0o755);
+    process.env.LARKSUITE_CLI_USER_ACCESS_TOKEN = 'test-token';
+    process.env.LARKSUITE_CLI_APP_ID = 'test-app';
     const config = internFlowConfigSchema.parse({
       version: 1,
       timezone: 'Asia/Shanghai',
@@ -434,6 +450,8 @@ esac
     await writeFile(parser, '#!/bin/sh\nexit 3\n');
     await chmod(lark, 0o755);
     await chmod(parser, 0o755);
+    process.env.LARKSUITE_CLI_USER_ACCESS_TOKEN = 'test-token';
+    process.env.LARKSUITE_CLI_APP_ID = 'test-app';
     const config = internFlowConfigSchema.parse({
       version: 1,
       timezone: 'Asia/Shanghai',
@@ -524,14 +542,22 @@ esac
     await mkdir(reports);
     await writeFile(executable, `#!/bin/sh
 printf '%s\n' '---' "$@" >> "$CAPTURE_LOG"
-printf '%s\n' '---' >> "$CAPTURE_INPUT"
-cat >> "$CAPTURE_INPUT"
-printf '%s\n' '{"ok":true,"data":{"result":"success","document":{"revision_id":8}}}'
+case " $* " in
+  *" +fetch "*)
+    printf '%s\n' '{"ok":true,"data":{"document":{"content":"# 2026-07-15\\n\\n今天日报\\n\\n# 2026-07-14\\n\\n昨天日报\\n","revision_id":8}}}'
+    ;;
+  *)
+    printf '%s\n' '---' >> "$CAPTURE_INPUT"
+    cat >> "$CAPTURE_INPUT"
+    printf '%s\n' '{"ok":true,"data":{"result":"success","document":{"revision_id":8}}}'
+    ;;
+esac
 `);
     await chmod(executable, 0o755);
     process.env.CAPTURE_LOG = argsPath;
     process.env.CAPTURE_INPUT = inputPath;
     process.env.INTERNFLOW_STATE_DIR = join(directory, 'state');
+    process.env.INTERNFLOW_LARK_CHUNK_DELAY_MS = '0';
     const config = internFlowConfigSchema.parse({
       version: 1,
       timezone: 'Asia/Shanghai',
@@ -571,5 +597,83 @@ printf '%s\n' '{"ok":true,"data":{"result":"success","document":{"revision_id":8
     expect(input).toContain('<whiteboard type="mermaid">\nflowchart LR\n  A --> B\n</whiteboard>');
     expect(input).toContain('# 2026-07-14\n昨天日报');
     expect(input).not.toContain('```mermaid');
+  });
+
+  it('publishes docx history with parser auth and chunked lark-cli writes', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'internflow-larkparser-history-'));
+    const reports = join(directory, 'reports');
+    const lark = join(directory, 'fake-lark.sh');
+    const parser = join(directory, 'fake-parser.sh');
+    const larkArgsPath = join(directory, 'lark-args.log');
+    const inputPath = join(directory, 'input.md');
+    const authPath = join(directory, 'auth.log');
+    const parserInvokedPath = join(directory, 'parser-invoked');
+    const insertedPath = join(directory, 'inserted');
+    await mkdir(reports);
+    await writeFile(lark, `#!/bin/sh
+printf '%s\n' "$@" >> "${larkArgsPath}"
+printf '%s:%s' "$LARKSUITE_CLI_APP_ID" "$LARKSUITE_CLI_USER_ACCESS_TOKEN" > "${authPath}"
+case " $* " in
+  *" +fetch "*)
+    if [ -f "${insertedPath}" ]; then
+      printf '%s\n' '{"ok":true,"data":{"document":{"content":"# 2026-07-15 工作日报\\n\\n今天日报\\n","revision_id":2}}}'
+    else
+      printf '%s\n' '{"ok":true,"data":{"document":{"content":"","revision_id":1}}}'
+    fi
+    ;;
+  *)
+    cat >> "${inputPath}"
+    printf inserted > "${insertedPath}"
+    printf '%s\n' '{"ok":true,"data":{"result":"success","document":{"revision_id":2}}}'
+    ;;
+esac
+`);
+    await writeFile(parser, `#!/bin/sh
+printf invoked > "${parserInvokedPath}"
+exit 99
+`);
+    await chmod(lark, 0o755);
+    await chmod(parser, 0o755);
+    process.env.INTERNFLOW_STATE_DIR = join(directory, 'state');
+    process.env.INTERNFLOW_LARK_CHUNK_DELAY_MS = '0';
+    process.env.LARKSUITE_CLI_USER_ACCESS_TOKEN = 'test-token';
+    process.env.LARKSUITE_CLI_APP_ID = 'test-app';
+    const config = internFlowConfigSchema.parse({
+      version: 1,
+      timezone: 'Asia/Shanghai',
+      jobs: {
+        'daily-report': {
+          enabled: true,
+          template: 'daily-report',
+          schedule: { time: '23:30', days: ['wed'] },
+          source: { type: 'codex' },
+          generator: { type: 'codex', model: null },
+          sinks: [
+            { type: 'markdown', directory: reports, filename: '{date}.md', archive: true },
+            {
+              type: 'lark', document: 'https://example.com/docx/doc-token-123456',
+              executable: lark, parserExecutable: parser,
+              mode: 'history-replace', identity: 'user', title: 'Codex 日报',
+            },
+          ],
+        },
+      },
+    });
+    const job = config.jobs['daily-report']!;
+
+    const result = await new LarkSink().apply({
+      jobName: 'daily-report', job, date: '2026-07-15', timezone: config.timezone,
+      dryRun: false, force: false,
+    }, job.sinks[1]!, {
+      kind: 'markdown', markdown: '# 2026-07-15 工作日报\n\n今天日报\n',
+    });
+
+    const args = await readFile(larkArgsPath, 'utf8');
+    expect(args).toContain('--command\nblock_insert_after\n--block-id\n0');
+    expect(args).toContain('+fetch\n--api-version\nv2');
+    expect(await readFile(authPath, 'utf8')).toBe('test-app:test-token');
+    expect(await readFile(inputPath, 'utf8')).toContain('# 2026-07-15 工作日报');
+    await expect(access(parserInvokedPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(result).toMatchObject({ applied: true, reportCount: 1 });
   });
 });

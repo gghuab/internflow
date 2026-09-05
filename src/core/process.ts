@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 
 export interface RunCommandOptions {
   cwd?: string;
+  env?: NodeJS.ProcessEnv;
   input?: string;
   timeoutMs?: number;
   inheritStdio?: boolean;
@@ -29,7 +30,8 @@ export async function runCommand(
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args, {
       cwd: options.cwd,
-      env: process.env,
+      // 调用方可只给当前子进程注入短期凭证，避免污染全局环境或落盘。
+      env: { ...process.env, ...options.env },
       stdio: options.inheritStdio ? 'inherit' : 'pipe',
       // POSIX 上创建独立进程组，超时时可同时终止命令派生出的子进程。
       detached: process.platform !== 'win32',

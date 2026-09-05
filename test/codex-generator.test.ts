@@ -203,12 +203,21 @@ done
     expect(await readFile(argsPath, 'utf8')).toContain('--output-schema');
   });
 
-  it('does not publish a fallback daily report to Lark when Codex fails', async () => {
+  it('retries a failed daily report and keeps a safe diagnostic without publishing fallback', async () => {
     const directory = await mkdtemp(join(tmpdir(), 'internflow-generator-error-'));
     const executable = join(directory, 'fake-codex.sh');
-    await writeFile(executable, '#!/bin/sh\ncat >/dev/null\nprintf "private prompt content" >&2\nexit 1\n');
+    const attemptFile = join(directory, 'attempts.txt');
+    await writeFile(executable, `#!/bin/sh
+attempt=0
+if [ -f "$ATTEMPT_FILE" ]; then attempt=$(sed -n '1p' "$ATTEMPT_FILE"); fi
+printf '%s' $((attempt + 1)) > "$ATTEMPT_FILE"
+cat >/dev/null
+printf 'error: model unavailable\nprivate prompt content\n' >&2
+exit 1
+`);
     await chmod(executable, 0o755);
     process.env.INTERNFLOW_STATE_DIR = join(directory, 'state');
+    process.env.ATTEMPT_FILE = attemptFile;
     const config = createStarterConfig();
     const job = config.jobs['daily-report'];
     expect(job).toBeDefined();
@@ -235,9 +244,13 @@ done
       sourceCount: 1, filteredCount: 0, activities: [], dailyView: emptyDailyView(),
     };
 
-    await expect(new CodexGenerator().generate(context, {
+    const failure = expect(new CodexGenerator().generate(context, {
       type: 'codex', executable, model: null,
-    }, batch)).rejects.toThrow('已阻止回退稿写入飞书');
+    }, batch)).rejects;
+    await failure.toThrow('已阻止回退稿写入飞书');
+    await failure.toThrow('model unavailable');
+    await failure.not.toThrow('private prompt content');
+    expect(await readFile(attemptFile, 'utf8')).toBe('2');
   });
 
   it('falls back when Codex exits successfully without writing the output file', async () => {

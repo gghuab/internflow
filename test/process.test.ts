@@ -2,6 +2,19 @@ import { describe, expect, it } from 'vitest';
 import { runCommand } from '../src/core/process.js';
 
 describe('runCommand', () => {
+  it('injects credentials into one child process without mutating the parent environment', async () => {
+    const variable = 'INTERNFLOW_TEST_CHILD_CREDENTIAL';
+    delete process.env[variable];
+
+    const result = await runCommand(process.execPath, [
+      '-e',
+      `process.stdout.write(process.env.${variable} || '')`,
+    ], { env: { [variable]: 'child-only' } });
+
+    expect(result.stdout).toBe('child-only');
+    expect(process.env[variable]).toBeUndefined();
+  });
+
   it('preserves the child failure when stdin closes before a large prompt is written', async () => {
     const input = 'x'.repeat(8 * 1024 * 1024);
     const command = runCommand(process.execPath, [

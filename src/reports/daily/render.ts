@@ -42,21 +42,18 @@ export function validateDailyDraft(view: DailyReportView, draft: DailyDraft): Da
 
   const deepDiveCandidates = new Set(view.deepDiveCandidateIds);
   const takeawayCandidates = new Set(view.takeawayCandidateIds);
-  for (const entry of draft.deepDives) {
-    if (!deepDiveCandidates.has(entry.workItemId)) {
-      throw new Error(`Daily deep dive cites non-candidate work item ${entry.workItemId}.`);
-    }
+  // 模型枚举值不能由 JSON Schema 强约束；可选栏目按本地候选白名单收口，避免拖垮整份日报。
+  const deepDives = draft.deepDives.filter((entry) => deepDiveCandidates.has(entry.workItemId));
+  const allowedTakeaways = draft.takeaways.filter((entry) => takeawayCandidates.has(entry.workItemId));
+  for (const entry of deepDives) {
     validateCitedEntry(items, draft, entry.workItemId, entry.evidenceIds);
   }
-  for (const entry of draft.takeaways) {
-    if (!takeawayCandidates.has(entry.workItemId)) {
-      throw new Error(`Daily takeaway cites non-candidate work item ${entry.workItemId}.`);
-    }
+  for (const entry of allowedTakeaways) {
     validateCitedEntry(items, draft, entry.workItemId, entry.evidenceIds);
   }
-  const deepDiveIds = new Set(draft.deepDives.map((entry) => entry.workItemId));
+  const deepDiveIds = new Set(deepDives.map((entry) => entry.workItemId));
   // 候选集合允许重叠，但最终栏目不能重复消费同一工作项；局部去重优于整份日报回退。
-  const takeaways = draft.takeaways.filter((entry) => !deepDiveIds.has(entry.workItemId));
+  const takeaways = allowedTakeaways.filter((entry) => !deepDiveIds.has(entry.workItemId));
 
   for (const suggestion of draft.suggestions) {
     if (suggestion.workItemId && !items.has(suggestion.workItemId)) {
@@ -87,6 +84,7 @@ export function validateDailyDraft(view: DailyReportView, draft: DailyDraft): Da
   if (missingDiagrams.length) throw new Error('Daily draft omitted approved visual plan items.');
   return {
     ...draft,
+    deepDives,
     takeaways,
     diagrams: draft.diagrams.map((diagram) => ({
       ...diagram,

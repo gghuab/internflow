@@ -118,7 +118,8 @@ export class CodexGenerator implements GeneratorPlugin {
     let output = '';
     // Prompt 只走 stdin，避免会话和文档正文出现在进程参数列表中。
     try {
-      const maxAttempts = context.job.template === 'dev-log' ? 2 : 1;
+      // 日报和需求记录都属于定时任务，复用一次重试抵御瞬时模型或网络失败。
+      const maxAttempts = ['daily-report', 'dev-log'].includes(context.job.template) ? 2 : 1;
       let lastError: unknown;
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         // 每次重试前清理旧结果，避免把半成品当成新输出。
@@ -195,13 +196,23 @@ function dailyFallbackOrThrow(
   const writesToLark = context.job.sinks.some((sink) => sink.type === 'lark');
   // 正式同步不允许把对话拼接的回退稿冒充 AI 日报。
   if (!context.dryRun && writesToLark) {
+    const detail = dailyFailureDetail(cause);
     throw new Error(
-      'Codex 日报生成失败，已阻止回退稿写入飞书。请恢复网络后重试。',
+      `Codex 日报生成失败，已阻止回退稿写入飞书。原因：${detail}`,
       { cause },
     );
   }
   const fallback = buildFallbackDailyReport(batch);
   return { kind: 'markdown', markdown: fallback, rawMarkdown: fallback };
+}
+
+function dailyFailureDetail(cause: unknown): string {
+  const message = cause instanceof Error ? cause.message : String(cause);
+  const [firstLine = '未知错误'] = message.split(/\r?\n/);
+  // runCommand 已对敏感进程输出做过筛选，可以保留其诊断行；其他错误只保留类型首行。
+  return /(?:timed out|failed \(\d+\))/.test(firstLine)
+    ? message.replace(/\s*\r?\n\s*/g, ' | ').slice(0, 800)
+    : firstLine.slice(0, 300);
 }
 
 function isPeriodReport(template: RunContext['job']['template']): boolean {

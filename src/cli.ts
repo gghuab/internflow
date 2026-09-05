@@ -24,6 +24,11 @@ import { PluginRegistry } from './core/runtime/registry.js';
 import { runJob } from './core/runtime/runner.js';
 import { assertLaunchdTimezone, LaunchdScheduler } from './plugins/schedulers/launchd.js';
 import { addLocalDays } from './core/calendar.js';
+import {
+  isLarkIdentityAvailable,
+  resolveLarkParserWriter,
+  verifyLarkParserWriter,
+} from './plugins/sinks/lark.js';
 
 const program = new Command();
 
@@ -402,11 +407,60 @@ async function doctor(online = false): Promise<Array<{ ok: boolean; message: str
       const result = await sink.doctor(sinkConfig);
       checks.push({ ...result, message: `${jobName}: ${result.message}` });
       if (online && sinkConfig.type === 'lark') {
+        const parser = await resolveLarkParserWriter(sinkConfig);
+        if (parser) {
+          try {
+            const auth = await runCommand(
+              parser.executable,
+              ['auth', 'status', '--output', 'json'],
+              { timeoutMs: 30_000 },
+            );
+            if (!isSuccessfulLarkParserAuth(auth.stdout)) {
+              throw new Error('LarkParser authentication failed.');
+            }
+            checks.push({ ok: true, message: `${jobName}: LarkParser authentication verified.` });
+          } catch {
+            checks.push({ ok: false, message: `${jobName}: LarkParser authentication verification failed.` });
+            continue;
+          }
+          try {
+            const fetched = await runCommand(parser.executable, [
+              'fetch',
+              sinkConfig.document,
+              '--mode',
+              'fast',
+              '--json',
+            ], { timeoutMs: 3 * 60_000, sensitiveOutput: true });
+            if (!isSuccessfulLarkParserFetch(fetched.stdout)) {
+              throw new Error('LarkParser document fetch failed.');
+            }
+            checks.push({ ok: true, message: `${jobName}: Lark target document is readable.` });
+          } catch {
+            checks.push({ ok: false, message: `${jobName}: Lark target document is not readable.` });
+            continue;
+          }
+          try {
+            if (!await verifyLarkParserWriter(sinkConfig)) {
+              throw new Error('Chunked writer is unavailable.');
+            }
+            checks.push({ ok: true, message: `${jobName}: Lark chunked writer authentication verified.` });
+          } catch {
+            checks.push({ ok: false, message: `${jobName}: Lark chunked writer authentication failed.` });
+          }
+          continue;
+        }
         const executable = await resolveExecutable('lark-cli', sinkConfig.executable);
         if (!executable) continue;
         try {
           const profile = sinkConfig.profile ? ['--profile', sinkConfig.profile] : [];
-          await runCommand(executable, [...profile, 'auth', 'status', '--verify'], { timeoutMs: 30_000 });
+          const result = await runCommand(
+            executable,
+            [...profile, 'auth', 'status', '--verify'],
+            { timeoutMs: 30_000 },
+          );
+          if (!isLarkIdentityAvailable(result.stdout, sinkConfig.identity)) {
+            throw new Error(`Lark ${sinkConfig.identity} identity is unavailable.`);
+          }
           checks.push({ ok: true, message: `${jobName}: Lark authentication verified.` });
         } catch {
           checks.push({ ok: false, message: `${jobName}: Lark authentication verification failed.` });
@@ -429,7 +483,7 @@ async function doctor(online = false): Promise<Array<{ ok: boolean; message: str
             '--doc-format',
             'xml',
             '--as',
-            'user',
+            sinkConfig.identity,
             '--format',
             'json',
           ], { timeoutMs: 3 * 60_000, sensitiveOutput: true });
@@ -442,6 +496,22 @@ async function doctor(online = false): Promise<Array<{ ok: boolean; message: str
     }
   }
   return checks;
+}
+
+function isSuccessfulLarkParserAuth(output: string): boolean {
+  try {
+    return (JSON.parse(output) as { authorized?: boolean }).authorized === true;
+  } catch {
+    return false;
+  }
+}
+
+function isSuccessfulLarkParserFetch(output: string): boolean {
+  try {
+    return typeof (JSON.parse(output) as { markdown?: unknown }).markdown === 'string';
+  } catch {
+    return false;
+  }
 }
 
 function isSuccessfulLarkFetch(output: string): boolean {

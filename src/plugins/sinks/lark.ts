@@ -34,19 +34,19 @@ export class LarkSink implements SinkPlugin {
     const lark = asLarkConfig(config);
     // 日报覆盖与普通追加不依赖远端正文；仅需求记录生成前需要结构快照。
     if (lark.mode !== 'section-append') return {};
-    const executable = await requireLarkCli(lark);
+    const { executable, env } = await larkCliRuntime(lark);
     let markdown: string;
     if (lark.reader === 'larkparser') {
       try {
         markdown = await fetchDocumentWithLarkParser(lark);
       } catch {
         // larkparser 偶发网络失败时，回退到写入端 CLI 读取，避免整次任务在生成前中断。
-        markdown = (await fetchDocument(executable, lark, 'full', 'markdown')).content;
+        markdown = (await fetchDocument(executable, lark, 'full', 'markdown', env)).content;
       }
     } else {
-      markdown = (await fetchDocument(executable, lark, 'full', 'markdown')).content;
+      markdown = (await fetchDocument(executable, lark, 'full', 'markdown', env)).content;
     }
-    const outline = await fetchDocument(executable, lark, 'outline', 'xml');
+    const outline = await fetchDocument(executable, lark, 'outline', 'xml', env);
     return {
       markdown,
       headings: parseOutline(outline.content),
@@ -61,10 +61,10 @@ export class LarkSink implements SinkPlugin {
     snapshot?: SinkSnapshot,
   ): Promise<Record<string, unknown>> {
     const lark = asLarkConfig(config);
-    const executable = await requireLarkCli(lark);
     if (lark.mode === 'append') {
+      const { executable, env } = await larkCliRuntime(lark);
       if (artifact.kind !== 'markdown') throw new Error('Lark append mode requires a Markdown artifact.');
-      const current = await fetchDocument(executable, lark, 'outline', 'xml');
+      const current = await fetchDocument(executable, lark, 'outline', 'xml', env);
       if (!context.dryRun) {
         await updateDocument(
           executable,
@@ -73,6 +73,7 @@ export class LarkSink implements SinkPlugin {
           '',
           prepareLarkMarkdown(artifact.markdown),
           current.revisionId,
+          env,
         );
       }
       return { sink: this.name, mode: lark.mode, applied: !context.dryRun, revisionId: current.revisionId };
@@ -93,16 +94,22 @@ export class LarkSink implements SinkPlugin {
         markdown: artifact.markdown,
       });
       if (!context.dryRun) {
-        await replaceDocument(executable, lark, context, combined);
+        const parser = await resolveLarkParserWriter(lark);
+        if (parser) {
+          await syncDocumentHistoryWithLarkParser(parser, lark, context, combined);
+        } else {
+          await replaceDocument(await requireLarkCli(lark), lark, context, combined);
+        }
       }
       return {
         sink: this.name,
         mode: lark.mode,
         applied: !context.dryRun,
-        reportCount: (combined.match(/^# \d{4}-\d{2}-\d{2}$/gm) || []).length,
+        reportCount: (combined.match(/^# \d{4}-\d{2}-\d{2}(?: 工作日报)?$/gm) || []).length,
       };
     }
 
+    const { executable, env } = await larkCliRuntime(lark);
     if (artifact.kind !== 'records') throw new Error('Lark section-append mode requires records.');
     if (!snapshot?.headings) throw new Error('Lark section-append requires an inspected heading snapshot.');
     if (artifact.records.length === 0) {
@@ -124,12 +131,12 @@ export class LarkSink implements SinkPlugin {
     });
 
     // 生成期间文档可能被人工编辑。首次写入前重新校验标题，避免旧引用写到错误章节。
-    const currentOutline = await fetchDocument(executable, lark, 'outline', 'xml');
+    const currentOutline = await fetchDocument(executable, lark, 'outline', 'xml', env);
     assertHeadingsUnchanged(snapshot.headings, parseOutline(currentOutline.content));
 
     const updates: Array<Record<string, unknown>> = [];
     for (const { record, heading } of resolvedRecords) {
-      const section = await fetchSection(executable, lark, heading.blockId);
+      const section = await fetchSection(executable, lark, heading.blockId, env);
       const operation = record.operation || 'append';
       const preparedMarkdown = prepareLarkMarkdown(record.markdown);
       const firstHeading = firstMarkdownHeading(preparedMarkdown);
@@ -149,7 +156,7 @@ export class LarkSink implements SinkPlugin {
       const response = context.dryRun
         ? null
         : operation === 'replace'
-          ? await replaceSection(executable, lark, heading, section, preparedMarkdown)
+          ? await replaceSection(executable, lark, heading, section, preparedMarkdown, env)
           : await updateDocument(
             executable,
             lark,
@@ -157,6 +164,7 @@ export class LarkSink implements SinkPlugin {
             lastBlockId(section.content, heading.blockId),
             preparedMarkdown,
             section.revisionId,
+            env,
           );
       updates.push({
         targetRef: record.targetRef,
@@ -173,6 +181,9 @@ export class LarkSink implements SinkPlugin {
 
   async doctor(config: SinkConfig): Promise<{ ok: boolean; message: string }> {
     const lark = asLarkConfig(config);
+    if (await resolveLarkParserWriter(lark)) {
+      return { ok: true, message: 'larkparser/lark-cli credential bridge ready.' };
+    }
     const executable = await resolveExecutable('lark-cli', lark.executable);
     if (!executable) return { ok: false, message: 'lark-cli was not found.' };
     if (lark.reader === 'larkparser') {
@@ -185,6 +196,39 @@ export class LarkSink implements SinkPlugin {
     } catch (error) {
       return { ok: false, message: `lark-cli check failed: ${String(error)}` };
     }
+  }
+}
+
+export async function resolveLarkParserWriter(
+  config: SinkConfig,
+): Promise<{ executable: string; larkCli: string } | null> {
+  if (config.type !== 'lark' || config.identity !== 'user') return null;
+  if (config.mode !== 'history-replace' && config.reader !== 'larkparser') return null;
+  // 显式指定 lark-cli 时保持原行为；同时指定 parserExecutable 才切换写入端。
+  if (config.executable && !config.parserExecutable) return null;
+  const [executable, larkCli] = await Promise.all([
+    resolveExecutable('larkparser', config.parserExecutable),
+    resolveExecutable('lark-cli', config.executable),
+  ]);
+  return executable && larkCli ? { executable, larkCli } : null;
+}
+
+export async function verifyLarkParserWriter(config: SinkConfig): Promise<boolean> {
+  const writer = await resolveLarkParserWriter(config);
+  if (!writer || config.type !== 'lark') return false;
+  const auth = await larkCliExternalAuthEnvironment();
+  const document = await fetchDocument(writer.larkCli, config, 'full', 'markdown', auth);
+  return document.content.length > 0;
+}
+
+export function isLarkIdentityAvailable(output: string, identity: LarkConfig['identity']): boolean {
+  try {
+    const status = JSON.parse(output) as {
+      identities?: Record<string, { available?: boolean }>;
+    };
+    return status.identities?.[identity]?.available === true;
+  } catch {
+    return false;
   }
 }
 
@@ -210,6 +254,7 @@ async function replaceDocument(
   config: LarkConfig,
   context: RunContext,
   markdown: string,
+  env?: NodeJS.ProcessEnv,
 ): Promise<void> {
   const runDirectory = join(stateDirectory(), 'runs', context.jobName, context.date);
   await mkdir(runDirectory, { recursive: true });
@@ -221,6 +266,7 @@ async function replaceDocument(
   ].join('\n');
   await writeFile(markdownPath, content, { encoding: 'utf8', mode: 0o600 });
   const chunks = splitHistoryMarkdown(content);
+  const chunkDelayMs = larkChunkDelayMs();
   for (const [index, chunk] of chunks.entries()) {
     const command = index === 0 ? 'overwrite' : 'append';
     const result = await runCommand(executable, [
@@ -238,6 +284,7 @@ async function replaceDocument(
       '--content',
       '-',
     ], {
+      ...(env ? { env } : {}),
       input: chunk,
       timeoutMs: 5 * 60_000,
       sensitiveOutput: true,
@@ -246,7 +293,158 @@ async function replaceDocument(
     if (!response.ok || response.data?.result !== 'success') {
       throw new Error(`Lark ${command} failed: ${JSON.stringify(response.error || response)}`);
     }
+    // 飞书文档连续改版过快会触发版本冲突；逐日报节流换取确定性写入。
+    if (index < chunks.length - 1 && chunkDelayMs > 0) await delay(chunkDelayMs);
   }
+
+  const remote = await fetchDocument(executable, config, 'full', 'markdown', env);
+  const expectedHeadings = dailyHistoryHeadings(content);
+  const actualHeadings = dailyHistoryHeadings(remote.content);
+  if (expectedHeadings.join('\n') !== actualHeadings.join('\n')) {
+    throw new Error(
+      `Lark history verification failed: expected ${expectedHeadings.length} reports, got ${actualHeadings.length}.`,
+    );
+  }
+}
+
+async function syncDocumentHistoryWithLarkParser(
+  parser: { executable: string; larkCli: string },
+  config: LarkConfig,
+  context: RunContext,
+  markdown: string,
+): Promise<void> {
+  const runDirectory = join(stateDirectory(), 'runs', context.jobName, context.date);
+  await mkdir(runDirectory, { recursive: true });
+  const content = prepareLarkMarkdown(markdown);
+  await writeFile(join(runDirectory, 'combined.md'), content, { encoding: 'utf8', mode: 0o600 });
+
+  const auth = await larkCliExternalAuthEnvironment();
+  const current = await fetchDocument(parser.larkCli, config, 'full', 'markdown', auth);
+  const expectedDates = dailyHistoryHeadings(content);
+  const currentDates = dailyHistoryHeadings(current.content);
+  const existingOffset = expectedDates.length - currentDates.length;
+  if (existingOffset < 0
+    || expectedDates.slice(existingOffset).join('\n') !== currentDates.join('\n')) {
+    throw new Error(
+      'Lark history is not a suffix of the local archive; refusing a destructive full-document rewrite.',
+    );
+  }
+
+  const missing = splitHistoryMarkdown(content).slice(0, existingOffset);
+  for (const report of [...missing].reverse()) {
+    await insertHistoryReport(parser.larkCli, config, auth, report);
+    if (larkChunkDelayMs() > 0) await delay(larkChunkDelayMs());
+  }
+
+  const remote = await fetchDocument(parser.larkCli, config, 'full', 'markdown', auth);
+  const actualDates = dailyHistoryHeadings(remote.content);
+  if (expectedDates.join('\n') !== actualDates.join('\n')) {
+    throw new Error(
+      `Lark history verification failed: expected ${expectedDates.length} reports, got ${actualDates.length}.`,
+    );
+  }
+}
+
+async function insertHistoryReport(
+  executable: string,
+  config: LarkConfig,
+  env: NodeJS.ProcessEnv,
+  markdown: string,
+): Promise<void> {
+  const expectedHeadings = markdownHeadings(markdown);
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      const result = await runCommand(executable, [
+        ...profileArgs(config),
+        'docs',
+        '+update',
+        '--api-version',
+        'v2',
+        '--doc',
+        config.document,
+        '--command',
+        'block_insert_after',
+        '--block-id',
+        '0',
+        '--doc-format',
+        'markdown',
+        '--content',
+        '-',
+        '--as',
+        config.identity,
+      ], { env, input: markdown, timeoutMs: 5 * 60_000, sensitiveOutput: true });
+      const response = parseResponse(result.stdout, 'insert history report');
+      if (response.ok && response.data?.result === 'success') return;
+    } catch {
+      // 写入端可能在服务端已成功后丢失回包；下面统一读回确认，避免重复插入。
+    }
+
+    const remote = await fetchDocument(executable, config, 'full', 'markdown', env);
+    if (markdownHeadings(remote.content).slice(0, expectedHeadings.length).join('\n')
+      === expectedHeadings.join('\n')) return;
+    if (attempt < 2) await delay(5_000);
+  }
+  throw new Error(`Lark failed to insert history report ${dailyHistoryHeadings(markdown)[0] || 'unknown'}.`);
+}
+
+async function larkCliExternalAuthEnvironment(): Promise<NodeJS.ProcessEnv> {
+  const currentToken = process.env.LARKSUITE_CLI_USER_ACCESS_TOKEN?.trim();
+  const currentAppId = process.env.LARKSUITE_CLI_APP_ID?.trim();
+  if (currentToken && currentAppId) {
+    return {
+      LARKSUITE_CLI_USER_ACCESS_TOKEN: currentToken,
+      LARKSUITE_CLI_APP_ID: currentAppId,
+    };
+  }
+
+  const bytedcli = await resolveExecutable('bytedcli');
+  if (!bytedcli) throw new Error('bytedcli was not found for Lark user authentication.');
+  const jwt = (await runCommand(bytedcli, ['auth', 'get-bytecloud-jwt-token'], {
+    timeoutMs: 30_000,
+    sensitiveOutput: true,
+  })).stdout.trim();
+  if (!jwt) throw new Error('bytedcli returned an empty ByteCloud JWT.');
+
+  const baseUrl = process.env.LARK_PARSER_BASE_URL?.trim() || 'https://agihub.bytedance.net';
+  const response = await fetch(`${baseUrl}/api/v3/lark_doc/auth/lark_token`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-jwt-token': jwt },
+    body: '{}',
+    signal: AbortSignal.timeout(30_000),
+  });
+  const payload = await response.json() as {
+    code?: number;
+    message?: string;
+    data?: { access_token?: string; app_id?: string };
+  };
+  const accessToken = payload.data?.access_token;
+  const appId = payload.data?.app_id;
+  if (!response.ok || payload.code !== 0 || !accessToken || !appId) {
+    throw new Error(`Unable to obtain Lark user token: ${payload.message || response.status}.`);
+  }
+  return {
+    LARKSUITE_CLI_USER_ACCESS_TOKEN: accessToken,
+    LARKSUITE_CLI_APP_ID: appId,
+  };
+}
+
+function dailyHistoryHeadings(markdown: string): string[] {
+  return [...markdown.matchAll(/^# (20\d{2}-\d{2}-\d{2})(?: 工作日报)?$/gm)]
+    .map((match) => match[1] || '');
+}
+
+function markdownHeadings(markdown: string): string[] {
+  return [...markdown.matchAll(/^(#{1,6})\s+(.+)$/gm)]
+    .map((match) => `${match[1]} ${(match[2] || '').trim()}`);
+}
+
+function larkChunkDelayMs(): number {
+  const configured = Number(process.env.INTERNFLOW_LARK_CHUNK_DELAY_MS || 2_000);
+  return Number.isFinite(configured) && configured >= 0 ? configured : 2_000;
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 /** 按日报边界分批写入，避免大文档整页覆盖触发服务端超时。 */
@@ -310,6 +508,7 @@ async function fetchDocument(
   config: LarkConfig,
   scope: 'full' | 'outline',
   format: 'markdown' | 'xml',
+  env?: NodeJS.ProcessEnv,
 ): Promise<{ content: string; revisionId: number }> {
   const result = await runCommand(executable, [
     ...profileArgs(config),
@@ -329,7 +528,10 @@ async function fetchDocument(
     config.identity,
     '--format',
     'json',
-  ], { timeoutMs: 3 * 60_000 });
+  ], {
+    ...(env ? { env, sensitiveOutput: true } : {}),
+    timeoutMs: 3 * 60_000,
+  });
   return documentFromResponse(result.stdout, `fetch ${scope}`);
 }
 
@@ -337,6 +539,7 @@ async function fetchSection(
   executable: string,
   config: LarkConfig,
   headingId: string,
+  env?: NodeJS.ProcessEnv,
 ): Promise<{ content: string; revisionId: number }> {
   const result = await runCommand(executable, [
     ...profileArgs(config),
@@ -358,7 +561,10 @@ async function fetchSection(
     config.identity,
     '--format',
     'json',
-  ], { timeoutMs: 3 * 60_000 });
+  ], {
+    ...(env ? { env, sensitiveOutput: true } : {}),
+    timeoutMs: 3 * 60_000,
+  });
   return documentFromResponse(result.stdout, `fetch section ${headingId}`);
 }
 
@@ -368,6 +574,7 @@ async function replaceSection(
   heading: HeadingReference,
   section: { content: string; revisionId: number },
   markdown: string,
+  env?: NodeJS.ProcessEnv,
 ): Promise<LarkResponse> {
   assertReplaceableSection(section.content, heading.blockId);
   const oldBlockIds = topLevelBlockIds(section.content);
@@ -382,6 +589,7 @@ async function replaceSection(
       heading.blockId,
       markdown,
       section.revisionId,
+      env,
     );
   }
 
@@ -393,6 +601,7 @@ async function replaceSection(
     oldBlockIds.at(-1) || heading.blockId,
     markdown,
     section.revisionId,
+    env,
   );
   return updateDocument(
     executable,
@@ -401,6 +610,7 @@ async function replaceSection(
     oldBlockIds.join(','),
     undefined,
     updateRevision(inserted, section.revisionId),
+    env,
   );
 }
 
@@ -411,6 +621,7 @@ async function updateDocument(
   blockId: string,
   content: string | undefined,
   revisionId: number,
+  env?: NodeJS.ProcessEnv,
 ): Promise<LarkResponse> {
   const args = [
     ...profileArgs(config),
@@ -427,6 +638,7 @@ async function updateDocument(
   if (content !== undefined) args.push('--doc-format', 'markdown', '--content', '-');
   args.push('--revision-id', String(revisionId), '--as', config.identity);
   const result = await runCommand(executable, args, {
+    ...(env ? { env } : {}),
     ...(content !== undefined ? { input: content } : {}),
     timeoutMs: 5 * 60_000,
     sensitiveOutput: true,
@@ -589,6 +801,14 @@ async function requireLarkCli(config: LarkConfig): Promise<string> {
   const executable = await resolveExecutable('lark-cli', config.executable);
   if (!executable) throw new Error('lark-cli was not found. Run `internflow doctor`.');
   return executable;
+}
+
+async function larkCliRuntime(
+  config: LarkConfig,
+): Promise<{ executable: string; env?: NodeJS.ProcessEnv }> {
+  const writer = await resolveLarkParserWriter(config);
+  if (!writer) return { executable: await requireLarkCli(config) };
+  return { executable: writer.larkCli, env: await larkCliExternalAuthEnvironment() };
 }
 
 function asLarkConfig(config: SinkConfig): LarkConfig {
